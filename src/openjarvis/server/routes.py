@@ -127,6 +127,7 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
     # Inject memory context into messages before dispatching
     config = getattr(request.app.state, "config", None)
     memory_backend = getattr(request.app.state, "memory_backend", None)
+    memory_service = getattr(request.app.state, "memory_service", None)
     if (
         config is not None
         and config.agent.context_from_memory
@@ -135,7 +136,6 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
         try:
             from openjarvis.tools.storage.context import ContextConfig, inject_context
 
-            memory_service = getattr(request.app.state, "memory_service", None)
             facts = memory_service.list_facts() if memory_service is not None else []
 
             # Extract query from the last user message
@@ -145,17 +145,21 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
                     query_text = m.content
                     break
 
-            if query_text:
+            if query_text and agent is None:
+                # Agent paths (_handle_agent / _handle_agent_stream) inject
+                # identity/persona AND memory context themselves (mirroring
+                # QueryOrchestrator.ask()'s reference pattern), operating on
+                # internal Message objects so the memory_context tag survives
+                # to BaseAgent._build_messages()'s merge logic. Doing it here
+                # too — on the public ChatMessage wire schema, which has no
+                # metadata field — would either double-inject identity or
+                # inject an untagged, unmergeable second SYSTEM message.
+                # This block is now for the engine-direct paths only
+                # (_handle_direct / _handle_stream / _handle_stream_tools),
+                # which is what it originally targeted (see
+                # _ensure_identity_prompt's docstring).
                 messages = _to_messages(request_body.messages)
-                if agent is None:
-                    # Agent paths (_handle_agent / _handle_agent_stream) already
-                    # inject identity/persona via BaseAgent._build_messages()
-                    # (SystemPromptBuilder). Injecting it here too would
-                    # double it: this message loses its distinguishing tag
-                    # once round-tripped through the public ChatMessage
-                    # schema (no metadata field), so the agent-side merge
-                    # logic can't recognize it as already-injected.
-                    messages = _ensure_identity_prompt(messages, config)
+                messages = _ensure_identity_prompt(messages, config)
                 ctx_cfg = ContextConfig(
                     top_k=config.memory.context_top_k,
                     min_score=config.memory.context_min_score,
@@ -307,6 +311,9 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
             complexity_info,
             trace_store=getattr(request.app.state, "trace_store", None),
             bus=getattr(request.app.state, "bus", None),
+            config=config,
+            memory_backend=memory_backend,
+            memory_service=memory_service,
         )
     else:
         bus = getattr(request.app.state, "bus", None)
@@ -527,6 +534,9 @@ def _handle_agent(
     *,
     trace_store=None,
     bus=None,
+    config=None,
+    memory_backend=None,
+    memory_service=None,
 ) -> ChatCompletionResponse:
     """Run through agent.
 
@@ -548,6 +558,36 @@ def _handle_agent(
 
     # Last message is the input
     input_text = req.messages[-1].content if req.messages else ""
+
+    # Memory-context enrichment, mirrored from QueryOrchestrator.ask() (the
+    # reference pattern used by Operators/Scheduler/CLI): done here, on
+    # internal Message objects added directly to ctx.conversation, so the
+    # memory_context tag survives to BaseAgent._build_messages()'s merge
+    # logic — unlike a server-layer inject_context() call, whose result
+    # would be lost crossing the public ChatMessage wire schema (no
+    # metadata field) before reaching this function.
+    if config is not None and config.agent.context_from_memory and input_text:
+        try:
+            from openjarvis.tools.storage.context import ContextConfig, inject_context
+
+            facts = memory_service.list_facts() if memory_service is not None else []
+            ctx_cfg = ContextConfig(
+                top_k=config.memory.context_top_k,
+                min_score=config.memory.context_min_score,
+                max_context_tokens=config.memory.context_max_tokens,
+            )
+            ctx.conversation.messages = inject_context(
+                input_text,
+                ctx.conversation.messages,
+                memory_backend,
+                config=ctx_cfg,
+                facts=facts,
+            )
+        except Exception:
+            logging.getLogger("openjarvis.server").debug(
+                "Agent-path memory context injection failed",
+                exc_info=True,
+            )
 
     # Override agent model for this request if the caller specified one
     original_model = agent._model
