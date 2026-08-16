@@ -193,7 +193,7 @@ def logs(operator_id: str, lines: int) -> None:
 
         store = SchedulerStore(db_path=db_path)
         task_id = f"operator:{operator_id}"
-        runs = store.get_runs(task_id, limit=lines)
+        runs = store.get_run_logs(task_id, limit=lines)
 
         if not runs:
             console.print(f"[dim]No logs found for operator {operator_id}[/dim]")
