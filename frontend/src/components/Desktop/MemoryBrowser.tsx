@@ -319,21 +319,30 @@ export function MemoryBrowser({ apiUrl }: { apiUrl: string }) {
             Showing {results.length} of {resultTotal} results
           </div>
           <div style={styles.resultsList}>
+            {/* Results are ranked highest-relevance-first by the backend
+                (sqlite/BM25 by default). BM25 scores are unbounded raw
+                relevance ranks, not probabilities — there is no score value
+                that means "100% match", so the bar width below is scaled
+                relative to the top result of *this* search rather than
+                against a fixed scale. */}
             {results.map((chunk, i) => {
-              const scorePercent = Math.round(chunk.score * 100);
+              const topScore = results[0]?.score || 0;
+              const relativePercent = topScore > 0 ? Math.round((chunk.score / topScore) * 100) : 0;
               return (
                 <div key={i} style={styles.resultCard}>
                   {/* Score bar */}
                   <div style={styles.scoreContainer}>
                     <div style={styles.scoreHeader}>
                       <span style={styles.scoreLabel}>Relevance</span>
-                      <span style={styles.scoreValue}>{scorePercent}%</span>
+                      <span style={styles.scoreValue} title="Relevance score (BM25) — higher is more relevant; not a percentage">
+                        Score: {chunk.score.toFixed(1)}
+                      </span>
                     </div>
                     <div style={styles.scoreBar}>
                       <div
                         style={{
                           ...styles.scoreFill,
-                          width: `${Math.min(scorePercent, 100)}%`,
+                          width: `${relativePercent}%`,
                         }}
                       />
                     </div>

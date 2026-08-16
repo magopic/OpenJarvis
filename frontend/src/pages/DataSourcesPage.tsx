@@ -1804,41 +1804,59 @@ function MemorySection() {
         )}
         {searchResults.length > 0 && (
           <div className="mt-3 space-y-2">
-            {searchResults.map((r, i) => (
-              <div
-                key={i}
-                className="rounded-lg p-3 transition-colors"
-                style={{
-                  background: 'var(--color-bg)',
-                  border: '1px solid var(--color-border)',
-                }}
-              >
-                <p className="text-xs leading-relaxed" style={{ color: 'var(--color-text)' }}>
-                  {r.content.length > 250 ? r.content.slice(0, 250) + '...' : r.content}
-                </p>
-                <div className="flex items-center gap-3 mt-2">
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium" style={{
-                    background: r.score > 0.5
-                      ? 'rgba(74, 222, 128, 0.1)'
-                      : r.score > 0.2
-                        ? 'var(--color-accent-amber-subtle)'
-                        : 'var(--color-bg-tertiary)',
-                    color: r.score > 0.5
-                      ? 'var(--color-success)'
-                      : r.score > 0.2
-                        ? 'var(--color-warning)'
-                        : 'var(--color-text-tertiary)',
-                  }}>
-                    {(r.score * 100).toFixed(0)}% match
-                  </span>
-                  {r.metadata?.source != null && (
-                    <span className="text-[10px]" style={{ color: 'var(--color-text-tertiary)' }}>
-                      {String(r.metadata.source)}
-                    </span>
-                  )}
-                </div>
-              </div>
-            ))}
+            {/* Results are returned ranked highest-relevance-first (see
+                jarvis memory search / the sqlite/BM25 backend). BM25 scores
+                are unbounded raw relevance ranks, not probabilities — there
+                is no fixed value that means "100% match". Relevance tiers
+                below are computed relative to the top result in *this*
+                search rather than against an absolute threshold, so the
+                color coding stays meaningful across searches with very
+                different score magnitudes. */}
+            {(() => {
+              const topScore = searchResults[0]?.score || 0;
+              return searchResults.map((r, i) => {
+                const relative = topScore > 0 ? r.score / topScore : 0;
+                return (
+                  <div
+                    key={i}
+                    className="rounded-lg p-3 transition-colors"
+                    style={{
+                      background: 'var(--color-bg)',
+                      border: '1px solid var(--color-border)',
+                    }}
+                  >
+                    <p className="text-xs leading-relaxed" style={{ color: 'var(--color-text)' }}>
+                      {r.content.length > 250 ? r.content.slice(0, 250) + '...' : r.content}
+                    </p>
+                    <div className="flex items-center gap-3 mt-2">
+                      <span
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium"
+                        title="Relevance score (BM25) — higher is more relevant; not a percentage"
+                        style={{
+                          background: relative > 0.66
+                            ? 'rgba(74, 222, 128, 0.1)'
+                            : relative > 0.33
+                              ? 'var(--color-accent-amber-subtle)'
+                              : 'var(--color-bg-tertiary)',
+                          color: relative > 0.66
+                            ? 'var(--color-success)'
+                            : relative > 0.33
+                              ? 'var(--color-warning)'
+                              : 'var(--color-text-tertiary)',
+                        }}
+                      >
+                        Score: {r.score.toFixed(1)}
+                      </span>
+                      {r.metadata?.source != null && (
+                        <span className="text-[10px]" style={{ color: 'var(--color-text-tertiary)' }}>
+                          {String(r.metadata.source)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              });
+            })()}
           </div>
         )}
       </div>
