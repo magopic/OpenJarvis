@@ -297,6 +297,7 @@ class QueryOrchestrator:
     def _build_tools(self, tool_names: List[str]) -> List[BaseTool]:
         """Build tool instances from tool names."""
         from openjarvis.core.registry import ToolRegistry
+        from openjarvis.agents.tool_resolver import instantiate_registered_tool
 
         s = self._system
         tools: List[BaseTool] = []
@@ -311,7 +312,16 @@ class QueryOrchestrator:
 
                     tools.append(LLMTool(s.engine, model=s.model))
                 elif ToolRegistry.contains(name):
-                    tools.append(ToolRegistry.create(name))
+                    tools.append(
+                        instantiate_registered_tool(
+                            ToolRegistry.get(name),
+                            name,
+                            engine=s.engine,
+                            model=s.model,
+                            memory_backend=s.memory_backend,
+                            channel_backend=getattr(s, "channel_backend", None),
+                        )
+                    )
             except Exception as exc:
                 logger.warning("Failed to build tool %r: %s", name, exc)
         return tools
