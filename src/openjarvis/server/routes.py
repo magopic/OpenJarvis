@@ -147,7 +147,15 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
 
             if query_text:
                 messages = _to_messages(request_body.messages)
-                messages = _ensure_identity_prompt(messages, config)
+                if agent is None:
+                    # Agent paths (_handle_agent / _handle_agent_stream) already
+                    # inject identity/persona via BaseAgent._build_messages()
+                    # (SystemPromptBuilder). Injecting it here too would
+                    # double it: this message loses its distinguishing tag
+                    # once round-tripped through the public ChatMessage
+                    # schema (no metadata field), so the agent-side merge
+                    # logic can't recognize it as already-injected.
+                    messages = _ensure_identity_prompt(messages, config)
                 ctx_cfg = ContextConfig(
                     top_k=config.memory.context_top_k,
                     min_score=config.memory.context_min_score,
