@@ -106,6 +106,12 @@ class TaskScheduler:
 
     # -- Public API ----------------------------------------------------------
 
+    def set_system(self, system: Any) -> None:
+        """Deferred system injection — called after JarvisSystem is
+        constructed (mirrors AgentExecutor.set_system(): the scheduler is
+        built before the JarvisSystem it will execute against exists yet)."""
+        self._system = system
+
     def start(self) -> None:
         """Start the background polling daemon thread."""
         if self._thread is not None and self._thread.is_alive():

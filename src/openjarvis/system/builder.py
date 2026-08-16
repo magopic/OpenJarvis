@@ -344,6 +344,8 @@ class SystemBuilder:
         system._mcp_clients = list(getattr(self, "_mcp_clients", []))
         if system.agent_executor is not None:
             system.agent_executor.set_system(system)
+        if system.scheduler is not None:
+            system.scheduler.set_system(system)
         return system
 
     def _resolve_engine(self, config: JarvisConfig):

@@ -309,7 +309,11 @@ def scheduler_start(poll_interval: int) -> None:
 
     from openjarvis.scheduler.scheduler import TaskScheduler
 
-    sched = TaskScheduler(store, poll_interval=poll_interval)
+    from openjarvis.core.config import load_config
+    from openjarvis.system import SystemBuilder
+
+    system = SystemBuilder(load_config()).build()
+    sched = TaskScheduler(store, system, poll_interval=poll_interval)
     sched.start()
     console.print(
         f"[green]Scheduler running (poll every {poll_interval}s). "
@@ -319,6 +323,7 @@ def scheduler_start(poll_interval: int) -> None:
     def _handle_signal(signum: int, frame: object) -> None:
         sched.stop()
         store.close()
+        system.close()
         console.print("\n[yellow]Scheduler stopped.[/yellow]")
         sys.exit(0)
 
