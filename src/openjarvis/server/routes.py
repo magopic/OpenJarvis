@@ -270,6 +270,8 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
                 trace_store=getattr(request.app.state, "trace_store", None),
                 bus=getattr(request.app.state, "bus", None),
                 memory_service=getattr(request.app.state, "memory_service", None),
+                config=config,
+                memory_backend=memory_backend,
             )
         return await _handle_stream(
             engine,
@@ -647,6 +649,8 @@ async def _handle_agent_stream(
     trace_store=None,
     bus=None,
     memory_service=None,
+    config=None,
+    memory_backend=None,
 ):
     """Run the configured agent and return its result as an SSE response.
 
@@ -683,6 +687,9 @@ async def _handle_agent_stream(
                 complexity_info,
                 trace_store=trace_store,
                 bus=bus,
+                config=config,
+                memory_backend=memory_backend,
+                memory_service=memory_service,
             )
         except Exception as exc:
             logging.getLogger("openjarvis.server").error(
