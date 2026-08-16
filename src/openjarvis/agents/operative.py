@@ -278,11 +278,10 @@ class OperativeAgent(ToolUsingAgent):
                 recent = session.messages[-10:]
                 return [
                     Message(
-                        role=Role(m.get("role", "user")),
-                        content=m.get("content", ""),
+                        role=Role(m.role),
+                        content=m.content,
                     )
                     for m in recent
-                    if isinstance(m, dict)
                 ]
         except Exception:
             logger.debug("Could not load session for operator %s", self._operator_id)
@@ -292,15 +291,12 @@ class OperativeAgent(ToolUsingAgent):
         """Save the tick's prompt and response to the session store."""
         if not self._session_store or not self._operator_id:
             return
-        session_id = f"operator:{self._operator_id}"
+        user_id = f"operator:{self._operator_id}"
         try:
+            session = self._session_store.get_or_create(user_id)
+            self._session_store.save_message(session.session_id, "user", input_text)
             self._session_store.save_message(
-                session_id,
-                {"role": "user", "content": input_text},
-            )
-            self._session_store.save_message(
-                session_id,
-                {"role": "assistant", "content": response},
+                session.session_id, "assistant", response
             )
         except Exception:
             logger.debug("Could not save session for operator %s", self._operator_id)
