@@ -241,15 +241,40 @@ class OperativeAgent(ToolUsingAgent):
         session_messages: Optional[list[Message]] = None,
     ) -> list[Message]:
         """Build message list with system prompt, session history, and input."""
+        context_messages = list(context.conversation.messages) if context else []
+
+        # Fold any memory-context SYSTEM message into the operator's own SYSTEM
+        # prompt instead of appending a second one. Mirrors the merge logic in
+        # BaseAgent._build_messages() — required because some chat templates
+        # (e.g. Qwen3-Coder) reject more than one SYSTEM message.
+        if system_prompt:
+            context_system_text = "\n\n".join(
+                message.text
+                for message in context_messages
+                if message.role == Role.SYSTEM
+                and message.metadata.get("memory_context")
+                and message.text
+            )
+            if context_system_text:
+                system_prompt = f"{system_prompt}\n\n{context_system_text}"
+                context_messages = [
+                    message
+                    for message in context_messages
+                    if not (
+                        message.role == Role.SYSTEM
+                        and message.metadata.get("memory_context")
+                    )
+                ]
+
         messages: list[Message] = []
         if system_prompt:
             messages.append(Message(role=Role.SYSTEM, content=system_prompt))
         # Inject session history (recent messages from previous ticks)
         if session_messages:
             messages.extend(session_messages)
-        # Context conversation (e.g. memory injection)
-        if context and context.conversation.messages:
-            messages.extend(context.conversation.messages)
+        # Any remaining (non memory-context) conversation messages
+        if context_messages:
+            messages.extend(context_messages)
         messages.append(Message(role=Role.USER, content=input))
         return messages
 
