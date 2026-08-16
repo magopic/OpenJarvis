@@ -95,20 +95,15 @@ class OperatorManager:
             "metrics": manifest.metrics,
         }
 
-        # Use the scheduler's create_task but with a deterministic ID
-        task = scheduler.create_task(
+        scheduler.create_task(
             prompt=_TICK_PROMPT,
             schedule_type=manifest.schedule_type,
             schedule_value=manifest.schedule_value,
+            task_id=task_id,
             agent="operative",
             tools=tools_str,
             metadata=metadata,
         )
-
-        # Override the random ID with our deterministic one
-        task_dict = task.to_dict()
-        task_dict["id"] = task_id
-        scheduler._store.save_task(task_dict)
         logger.info("Activated operator %s (task_id=%s)", operator_id, task_id)
         return task_id
 
