@@ -20,7 +20,11 @@ interface TraceStepData {
 
 interface TraceStep {
   step_type: string;
-  duration_ms: number;
+  // The API (GET /v1/traces) reports each step's duration in seconds, not
+  // milliseconds — a trace-level `duration_ms` field also exists, but it's
+  // a separate, unrelated total for the whole trace. Convert at the point
+  // of display instead of relying on a field that doesn't exist per-step.
+  duration_seconds: number;
   data: TraceStepData;
 }
 
@@ -404,7 +408,7 @@ function TimelineStep({ step }: TimelineStepProps) {
           >
             {step.step_type}
           </span>
-          <span style={styles.stepDuration}>{formatDuration(step.duration_ms)}</span>
+          <span style={styles.stepDuration}>{formatDuration(step.duration_seconds * 1000)}</span>
         </div>
         {step.data && <StepDataView data={step.data} />}
       </div>
@@ -477,7 +481,7 @@ export function TraceDebugger({ apiUrl }: { apiUrl: string }) {
 
   // Compute totals for detail header
   const totalDuration =
-    traceDetail?.steps.reduce((sum, s) => sum + s.duration_ms, 0) ?? 0;
+    traceDetail?.steps.reduce((sum, s) => sum + s.duration_seconds * 1000, 0) ?? 0;
 
   // --- Empty state ---
   if (!listLoading && traces.length === 0 && !error) {

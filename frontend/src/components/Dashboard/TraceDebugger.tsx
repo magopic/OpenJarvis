@@ -12,7 +12,11 @@ interface TraceStepData {
 
 interface TraceStep {
   step_type: string;
-  duration_ms: number;
+  // The API (GET /v1/traces) reports each step's duration in seconds, not
+  // milliseconds — a trace-level `duration_ms` field also exists, but it's
+  // a separate, unrelated total for the whole trace. Convert at the point
+  // of display instead of relying on a field that doesn't exist per-step.
+  duration_seconds: number;
   data: TraceStepData;
 }
 
@@ -45,7 +49,7 @@ function StepBadge({ type }: { type: string }) {
 }
 
 function TraceCard({ trace, isActive, onClick }: { trace: TraceSummary; isActive: boolean; onClick: () => void }) {
-  const totalMs = trace.steps.reduce((sum, s) => sum + s.duration_ms, 0);
+  const totalMs = trace.steps.reduce((sum, s) => sum + s.duration_seconds * 1000, 0);
 
   return (
     <button
@@ -96,7 +100,7 @@ function StepDetail({ step, index }: { step: TraceStep; index: number }) {
         <span className="flex-1" />
         <span className="text-xs font-mono flex items-center gap-1" style={{ color: 'var(--color-text-tertiary)' }}>
           <Clock size={10} />
-          {step.duration_ms.toFixed(0)}ms
+          {(step.duration_seconds * 1000).toFixed(0)}ms
         </span>
       </button>
       {expanded && dataEntries.length > 0 && (
