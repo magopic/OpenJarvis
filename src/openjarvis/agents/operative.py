@@ -259,9 +259,10 @@ class OperativeAgent(ToolUsingAgent):
             return ""
         state_key = f"operator:{self._operator_id}:state"
         try:
-            result = self._memory_backend.retrieve(state_key)
-            if result:
-                return result if isinstance(result, str) else str(result)
+            results = self._memory_backend.retrieve(state_key, top_k=5)
+            for result in results:
+                if result.source == state_key:
+                    return result.content
         except Exception:
             logger.debug("No previous state for operator %s", self._operator_id)
         return ""
@@ -309,7 +310,7 @@ class OperativeAgent(ToolUsingAgent):
         try:
             # Store a summary of the agent's response as state
             summary = content[:1000] if content else ""
-            self._memory_backend.store(state_key, summary)
+            self._memory_backend.store(summary, source=state_key)
         except Exception:
             logger.debug(
                 "Could not auto-persist state for operator %s",
