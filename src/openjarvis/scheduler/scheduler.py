@@ -240,10 +240,15 @@ class TaskScheduler:
                 if meta.get("operator_id"):
                     ask_kwargs["system_prompt"] = meta.get("system_prompt", "")
                     ask_kwargs["operator_id"] = meta["operator_id"]
-                result_text = self._system.ask(
-                    task.prompt,
-                    **ask_kwargs,
-                )
+                result = self._system.ask(task.prompt, **ask_kwargs)
+                if isinstance(result, dict):
+                    result_text = result.get("content", "") or ""
+                    if result.get("metadata", {}).get("max_turns_exceeded"):
+                        result_text = f"[max_turns_exceeded] {result_text}"
+                    if result.get("error"):
+                        raise RuntimeError(result_text or "Task reported an error")
+                else:
+                    result_text = str(result) if result is not None else ""
             else:
                 result_text = f"[dry-run] Would execute: {task.prompt}"
             success = True
