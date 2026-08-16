@@ -1,15 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { GitBranch, Clock, ChevronRight, ChevronDown } from 'lucide-react';
 
-interface TraceStepData {
-  model?: string;
-  tokens?: number;
-  tool?: string;
-  input?: string;
-  output?: string;
-  [key: string]: unknown;
-}
-
 interface TraceStep {
   step_type: string;
   // The API (GET /v1/traces) reports each step's duration in seconds, not
@@ -17,7 +8,11 @@ interface TraceStep {
   // a separate, unrelated total for the whole trace. Convert at the point
   // of display instead of relying on a field that doesn't exist per-step.
   duration_seconds: number;
-  data: TraceStepData;
+  // Real shape per GET /v1/traces — there has never been a flattened
+  // `data` field; each step reports these three separately.
+  input?: Record<string, unknown>;
+  output?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
 }
 
 interface TraceSummary {
@@ -78,7 +73,11 @@ function TraceCard({ trace, isActive, onClick }: { trace: TraceSummary; isActive
 
 function StepDetail({ step, index }: { step: TraceStep; index: number }) {
   const [expanded, setExpanded] = useState(false);
-  const dataEntries = Object.entries(step.data).filter(([_, v]) => v != null);
+  const dataEntries = [
+    ...Object.entries(step.input ?? {}),
+    ...Object.entries(step.output ?? {}),
+    ...Object.entries(step.metadata ?? {}),
+  ].filter(([_, v]) => v != null);
 
   return (
     <div

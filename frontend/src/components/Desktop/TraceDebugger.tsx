@@ -6,18 +6,6 @@ import { invoke } from '@tauri-apps/api/core';
 // Types
 // ---------------------------------------------------------------------------
 
-interface TraceStepData {
-  model?: string;
-  tokens?: number;
-  tool?: string;
-  input?: string;
-  output?: string;
-  backend?: string;
-  results?: number;
-  policy?: string;
-  [key: string]: unknown;
-}
-
 interface TraceStep {
   step_type: string;
   // The API (GET /v1/traces) reports each step's duration in seconds, not
@@ -25,7 +13,11 @@ interface TraceStep {
   // a separate, unrelated total for the whole trace. Convert at the point
   // of display instead of relying on a field that doesn't exist per-step.
   duration_seconds: number;
-  data: TraceStepData;
+  // Real shape per GET /v1/traces — there has never been a flattened
+  // `data` field; each step reports these three separately.
+  input?: Record<string, unknown>;
+  output?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
 }
 
 interface TraceSummary {
@@ -350,7 +342,7 @@ function stepColor(stepType: string): string {
 // Sub-components
 // ---------------------------------------------------------------------------
 
-function StepDataView({ data }: { data: TraceStepData }) {
+function StepDataView({ data }: { data: Record<string, unknown> }) {
   const [expanded, setExpanded] = useState(false);
 
   const entries = Object.entries(data).filter(
@@ -410,7 +402,7 @@ function TimelineStep({ step }: TimelineStepProps) {
           </span>
           <span style={styles.stepDuration}>{formatDuration(step.duration_seconds * 1000)}</span>
         </div>
-        {step.data && <StepDataView data={step.data} />}
+        <StepDataView data={{ ...step.input, ...step.output, ...step.metadata }} />
       </div>
     </div>
   );
