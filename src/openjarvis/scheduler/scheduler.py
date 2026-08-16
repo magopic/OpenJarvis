@@ -266,18 +266,23 @@ class TaskScheduler:
 
         finished_at = _now_iso()
 
-        # Log the run
         with self._lock:
-            self._store.log_run(
-                task_id=task.id,
-                started_at=started_at,
-                finished_at=finished_at,
-                success=success,
-                result=result_text,
-                error=error_text,
-            )
+            # Log the run — a logging failure must never block rescheduling
+            # below (that would strand next_run in the past and cause the
+            # poll loop to retry this task forever).
+            try:
+                self._store.log_run(
+                    task_id=task.id,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    success=success,
+                    result=result_text,
+                    error=error_text,
+                )
+            except Exception:
+                logger.exception("Failed to log run for task %s", task.id)
 
-            # Update task state
+            # Update task state — always runs, even if logging above failed.
             d = self._store.get_task(task.id)
             if d is not None:
                 d["last_run"] = finished_at
