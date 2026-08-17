@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import platform
 import subprocess
 import threading
 from typing import Optional
@@ -14,8 +15,47 @@ from openjarvis.agents.digest_store import DigestStore
 from openjarvis.core.config import DEFAULT_CONFIG_PATH, load_config
 
 
+def _play_audio_windows(audio_path: str) -> bool:
+    """Play an audio file synchronously via the Windows MCI (winmm.dll).
+
+    None of ffplay/aplay/afplay/paplay ship with Windows or are installed
+    by any OpenJarvis extra, so the generic player loop below silently
+    plays nothing on a vanilla Windows install. MCI is part of every
+    Windows installation (no extra dependency) and, unlike the stdlib
+    ``winsound`` module, isn't limited to WAV — digest audio is mp3 by
+    default (TTSResult.format default, and every non-kokoro TTS backend).
+
+    Returns True if MCI accepted and played the file, False if it
+    rejected it (e.g. missing codec) so the caller can fall back.
+    """
+    import ctypes
+
+    mci = ctypes.windll.winmm.mciSendStringW
+    alias = "openjarvis_digest_audio"
+
+    def _mci(command: str) -> int:
+        buf = ctypes.create_unicode_buffer(256)
+        return mci(command, buf, len(buf), 0)
+
+    if _mci(f'open "{audio_path}" alias {alias}') != 0:
+        return False
+    try:
+        # "wait" blocks this call until playback finishes, matching the
+        # blocking semantics of the subprocess players below.
+        return _mci(f"play {alias} wait") == 0
+    finally:
+        _mci(f"close {alias}")
+
+
 def _play_audio(audio_path: str) -> None:
     """Play audio file in background using available system player."""
+    if platform.system() == "Windows":
+        try:
+            if _play_audio_windows(audio_path):
+                return
+        except OSError:
+            pass  # winmm.dll unavailable for some reason — fall through
+
     players = ["ffplay -nodisp -autoexit", "aplay", "afplay", "paplay"]
     for player in players:
         cmd_parts = player.split() + [audio_path]
