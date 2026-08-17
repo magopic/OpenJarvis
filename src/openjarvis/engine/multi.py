@@ -35,8 +35,16 @@ class MultiEngine(InferenceEngine):
         for key, engine in self._engines:
             try:
                 for model_id in engine.list_models():
-                    self._model_map[model_id] = engine
-                    self._model_key_map[model_id] = key
+                    # First engine to claim a model_id wins. self._engines is
+                    # built with the deliberately-configured primary engine
+                    # first and auto-discovered duplicates (which may share
+                    # the same physical backend/port and therefore report
+                    # the same model_id) appended after. Overwriting here
+                    # let a later, undifferentiated duplicate silently steal
+                    # the primary's model routing, including its telemetry
+                    # instrumentation.
+                    self._model_map.setdefault(model_id, engine)
+                    self._model_key_map.setdefault(model_id, key)
             except Exception as exc:
                 logger.debug("Failed to list models for %s: %s", key, exc)
 
