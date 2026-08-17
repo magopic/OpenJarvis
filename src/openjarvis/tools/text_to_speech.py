@@ -81,7 +81,18 @@ class TextToSpeechTool(BaseTool):
         backend_cls = TTSRegistry.get(backend_key)
         backend = backend_cls()
 
-        result = backend.synthesize(text, voice_id=voice_id, speed=speed)
+        try:
+            result = backend.synthesize(text, voice_id=voice_id, speed=speed)
+        except Exception as exc:
+            # A backend can be registered (the class always is, at import
+            # time) without being usable — e.g. kokoro's package isn't
+            # installed. Report it the same way the two checks above do
+            # instead of letting the exception escape the tool.
+            return ToolResult(
+                tool_name="text_to_speech",
+                content=f"TTS backend '{backend_key}' failed: {exc}",
+                success=False,
+            )
 
         # Save to file
         if output_dir:
