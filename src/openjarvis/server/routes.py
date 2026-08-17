@@ -466,7 +466,26 @@ def _handle_direct(
         # event itself with energy + version intact. Only fall back to
         # the lightweight wrapper for engines that aren't already
         # instrumented.
-        if isinstance(engine, InstrumentedEngine):
+        #
+        # `engine` may be a MultiEngine wrapping several per-model engines,
+        # each independently possibly (un)instrumented. Checking
+        # isinstance(engine, InstrumentedEngine) on the outer object only
+        # ever catches a single-engine deployment; in a MultiEngine
+        # topology (the common case here) it was always False, so this
+        # branch never fired and instrumented_generate() below
+        # double-recorded every call once the model actually resolved to
+        # an instrumented engine. Resolve the engine that will actually
+        # handle *model* first, mirroring _engine_key_for_model()'s
+        # wrapper-walking (above).
+        from openjarvis.engine.multi import MultiEngine
+
+        resolved_engine = engine
+        if isinstance(engine, MultiEngine):
+            try:
+                resolved_engine = engine.resolve_engine(model)
+            except Exception:
+                resolved_engine = engine
+        if isinstance(resolved_engine, InstrumentedEngine):
             result = engine.generate(
                 messages,
                 model=model,

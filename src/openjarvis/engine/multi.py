@@ -136,6 +136,15 @@ class MultiEngine(InferenceEngine):
         self._refresh_map()
         return self._model_key_map.get(model)
 
+    def resolve_engine(self, model: str) -> InferenceEngine:
+        """Return the actual engine instance that will handle *model*.
+
+        Public counterpart to ``engine_key_for()`` for callers that need
+        the engine object itself (e.g. to check whether it's already
+        instrumented) rather than just its registry key.
+        """
+        return self._engine_for(model)
+
     def health(self) -> bool:
         return any(engine.health() for _key, engine in self._engines)
 
