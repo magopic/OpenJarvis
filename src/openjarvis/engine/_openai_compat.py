@@ -25,6 +25,14 @@ from openjarvis.engine._stubs import StreamChunk
 
 logger = logging.getLogger(__name__)
 
+# Sent verbatim as a trailing system message on the (at most one) finalization
+# retry — see ``_finalize_empty_response``. Deliberately generic: it must hold
+# for every OpenAI-compatible provider, not just reasoning-tuned local models.
+_FINALIZATION_INSTRUCTION = (
+    "Provide the final answer to the user now. Return only the "
+    "user-facing answer. Do not include reasoning or analysis."
+)
+
 
 class _OpenAICompatibleEngine(AsyncHTTPEngineMixin, InferenceEngine):
     """Base for engines that serve the OpenAI ``/v1/chat/completions`` API."""
@@ -165,7 +173,112 @@ class _OpenAICompatibleEngine(AsyncHTTPEngineMixin, InferenceEngine):
                 }
                 for tc in raw_tool_calls
             ]
+
+        # Reasoning-tuned models (llama.cpp/vLLM/SGLang with e.g.
+        # reasoning_format=deepseek) sometimes end a turn having spent the
+        # whole generation on ``reasoning_content`` without ever writing a
+        # user-facing ``content`` — the model's actual work is silently lost
+        # and the caller sees an empty response. ``reasoning_content`` is
+        # read here ONLY to detect that condition; its text is never stored,
+        # logged, or forwarded anywhere (see ``_finalize_empty_response``).
+        has_reasoning = bool(choice["message"].get("reasoning_content"))
+        if (
+            not result["content"]
+            and not result.get("tool_calls")
+            and has_reasoning
+            and result["finish_reason"] in ("stop", "length")
+        ):
+            result = self._finalize_empty_response(
+                messages,
+                result,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
         return result
+
+    def _finalize_empty_response(
+        self,
+        messages: Sequence[Message],
+        first_result: Dict[str, Any],
+        *,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> Dict[str, Any]:
+        """One-shot plain-text retry for a reasoning-only empty turn.
+
+        Re-sends the original conversation (system/persona and any tool
+        results already in ``messages``, unchanged) plus a single trailing
+        instruction to answer now — deliberately without ``tools``, so the
+        model cannot propose another tool call instead of finalizing, and
+        without the failed turn's ``reasoning_content``, which is never read
+        beyond the boolean check in ``generate()``. At most one attempt: this
+        method does not re-check its own result against the same condition,
+        so a still-empty retry simply falls through to the caller's existing
+        "No response was generated" handling untouched.
+
+        The trailing instruction is sent as ``role: "user"``, not
+        ``"system"``: several chat templates (e.g. Qwen3.5's, observed live
+        against llama-server) reject a system-role message anywhere but the
+        first position with a hard template error, which would silently
+        break the retry itself. The original system/persona message already
+        present in ``messages`` is untouched either way.
+        """
+        retry_payload: Dict[str, Any] = {
+            "model": model,
+            "messages": messages_to_dicts(messages)
+            + [{"role": "user", "content": _FINALIZATION_INSTRUCTION}],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+        try:
+            url = f"{self._api_prefix}/chat/completions"
+            resp = self._client.post(url, json=retry_payload)
+            resp.raise_for_status()
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError):
+            logger.info(
+                "%s: finalization retry request failed; keeping empty result",
+                self.engine_id,
+            )
+            return first_result
+
+        data = resp.json()
+        choices = data.get("choices", [])
+        if not choices:
+            return first_result
+
+        choice = choices[0]
+        retry_usage = data.get("usage", {})
+        first_usage = first_result.get("usage", {})
+        combined_usage = {
+            "prompt_tokens": first_usage.get("prompt_tokens", 0)
+            + retry_usage.get("prompt_tokens", 0),
+            "prompt_tokens_evaluated": first_usage.get(
+                "prompt_tokens_evaluated", 0
+            )
+            + retry_usage.get("prompt_tokens", 0),
+            "completion_tokens": first_usage.get("completion_tokens", 0)
+            + retry_usage.get("completion_tokens", 0),
+            "total_tokens": first_usage.get("total_tokens", 0)
+            + retry_usage.get("prompt_tokens", 0)
+            + retry_usage.get("completion_tokens", 0),
+        }
+        finalized_content = choice["message"].get("content") or ""
+        logger.info(
+            "%s: empty content with reasoning detected (finish_reason=%s); "
+            "finalization retry produced %d chars",
+            self.engine_id,
+            first_result.get("finish_reason"),
+            len(finalized_content),
+        )
+        return {
+            "content": finalized_content,
+            "usage": combined_usage,
+            "model": data.get("model", model),
+            "finish_reason": choice.get("finish_reason", "stop"),
+        }
 
     async def stream(
         self,
