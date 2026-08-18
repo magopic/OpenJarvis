@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -16,6 +17,16 @@ from typing import Any, Callable, Dict, List, Optional
 
 from openjarvis.core.events import EventBus, EventType
 from openjarvis.core.types import ToolCall, ToolResult
+
+logger = logging.getLogger(__name__)
+
+# Bound on how long a Web/API tool call will block waiting for a human
+# Approve/Deny click before treating it as a timeout. Local to this
+# mechanism only — not a new global config entry (Fase 3B.6 authorization
+# scope). No existing approval-timeout setting was found to reuse (verified
+# by search before implementing).
+_WEB_APPROVAL_TIMEOUT_SECONDS = 300.0
+_WEB_APPROVAL_POLL_INTERVAL_SECONDS = 1.5
 
 # ---------------------------------------------------------------------------
 # ToolSpec — metadata describing a tool's interface
@@ -223,30 +234,14 @@ class ToolExecutor:
             if isinstance(params, dict):
                 params.pop("_taint", None)
 
-        # Confirmation check for sensitive tools
-        if tool.spec.requires_confirmation:
-            if not self._interactive or self._confirm_callback is None:
-                return ToolResult(
-                    tool_name=tool_call.name,
-                    content=(
-                        f"Tool '{tool_call.name}' requires"
-                        " confirmation but no confirmation"
-                        " callback is available."
-                    ),
-                    success=False,
-                )
-            prompt = f"Allow execution of tool '{tool_call.name}' with args {params}?"
-            if not self._confirm_callback(prompt):
-                return ToolResult(
-                    tool_name=tool_call.name,
-                    content=f"Tool '{tool_call.name}' execution denied by user.",
-                    success=False,
-                )
-
-        # Emit start event. ``agent`` carries the managed-agent UUID so the
-        # AgentExecutor's trace subscriber (which filters by agent_id) can
-        # actually match this event — without it, every tool call is silently
-        # dropped from traces.
+        # Emit start event up front — covers the confirmation wait (if any)
+        # as well as execution, so a Web-approval-gated call is visible in
+        # trace from the moment it's requested, not only once it runs.
+        # ``agent`` carries the managed-agent UUID so the AgentExecutor's
+        # trace subscriber (which filters by agent_id) can actually match
+        # this event — without it, every tool call is silently dropped from
+        # traces.
+        t0 = time.time()
         if self._bus:
             self._bus.publish(
                 EventType.TOOL_CALL_START,
@@ -257,30 +252,64 @@ class ToolExecutor:
                 },
             )
 
-        # Execute with timeout
-        timeout = tool.spec.timeout_seconds or self._default_timeout
-        t0 = time.time()
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(tool.execute, **params)
-                result = future.result(timeout=timeout)
-        except concurrent.futures.TimeoutError:
-            if self._bus:
-                self._bus.publish(
-                    EventType.TOOL_TIMEOUT,
-                    {"tool": tool_call.name, "timeout": timeout},
+        # Confirmation check for sensitive tools. Two independent paths:
+        #  - CLI (``interactive`` + a real ``confirm_callback``): unchanged,
+        #    a synchronous terminal y/N prompt.
+        #  - Everything else (Web/API, Managed Agents): route through the
+        #    existing Approval queue/UI (ApprovalBell) instead of an
+        #    unconditional silent rejection.
+        result: Optional[ToolResult] = None
+        approval_action_id: Optional[str] = None
+        if tool.spec.requires_confirmation:
+            if self._interactive and self._confirm_callback is not None:
+                prompt = (
+                    f"Allow execution of tool '{tool_call.name}' with args {params}?"
                 )
-            result = ToolResult(
-                tool_name=tool_call.name,
-                content=(f"Tool '{tool_call.name}' timed out after {timeout:.0f}s."),
-                success=False,
-            )
-        except Exception as exc:
-            result = ToolResult(
-                tool_name=tool_call.name,
-                content=f"Tool execution error: {exc}",
-                success=False,
-            )
+                if not self._confirm_callback(prompt):
+                    result = ToolResult(
+                        tool_name=tool_call.name,
+                        content=f"Tool '{tool_call.name}' execution denied by user.",
+                        success=False,
+                    )
+            else:
+                approval_action_id, result = self._await_web_approval(
+                    tool_call, params
+                )
+
+        if result is None:
+            # Not gated, or gated and approved — execute with timeout.
+            timeout = tool.spec.timeout_seconds or self._default_timeout
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(tool.execute, **params)
+                    result = future.result(timeout=timeout)
+            except concurrent.futures.TimeoutError:
+                if self._bus:
+                    self._bus.publish(
+                        EventType.TOOL_TIMEOUT,
+                        {"tool": tool_call.name, "timeout": timeout},
+                    )
+                result = ToolResult(
+                    tool_name=tool_call.name,
+                    content=(
+                        f"Tool '{tool_call.name}' timed out after {timeout:.0f}s."
+                    ),
+                    success=False,
+                )
+            except Exception as exc:
+                result = ToolResult(
+                    tool_name=tool_call.name,
+                    content=f"Tool execution error: {exc}",
+                    success=False,
+                )
+            if approval_action_id is not None:
+                # Approved-then-executed: tag the result so the trace/API
+                # can tell it apart from a tool that never needed gating,
+                # matching the denied/timeout path's own "approval" tag.
+                result.metadata["approval"] = {
+                    "action_id": approval_action_id,
+                    "decision": "approved",
+                }
         latency = time.time() - t0
         result.latency_seconds = latency
         result.metadata["arguments"] = params
@@ -319,6 +348,93 @@ class ToolExecutor:
             )
 
         return result
+
+    def _await_web_approval(
+        self, tool_call: ToolCall, params: Dict[str, Any]
+    ) -> tuple[Optional[str], Optional[ToolResult]]:
+        """Gate a ``requires_confirmation`` tool call through the existing
+        Approval queue/UI (``ApprovalStore`` + ``ApprovalBell``) instead of
+        the CLI's synchronous ``confirm_callback``.
+
+        Queues a ``PendingAction`` — the same record type and REST surface
+        (``/v1/approvals/pending``, ``.../approve``, ``.../deny``) already
+        used by the proactive-agent approval flow, so no new endpoint or UI
+        is introduced. The payload is captured once, from the exact
+        ``params`` about to be executed, and is never modified afterwards:
+        approving action X can only resume the one tool call that queued X.
+
+        This call blocks (via ``time.sleep`` polling) for up to
+        ``_WEB_APPROVAL_TIMEOUT_SECONDS``. That is safe here because
+        ``ToolExecutor.execute()`` already always runs inside the
+        background thread backing the whole agent turn
+        (``asyncio.to_thread`` in ``server/routes.py``), which already
+        tolerates multi-minute waits for model inference — this adds no new
+        class of blocking behaviour to the request lifecycle.
+
+        Returns ``(action_id, None)`` when approved — the caller proceeds
+        to execute the tool normally and tags the eventual result with
+        ``action_id`` for traceability. Returns ``(action_id, ToolResult)``
+        for denied/timeout, where the ``ToolResult`` is terminal and the
+        caller must use it as-is without ever calling ``tool.execute()``.
+        """
+        from openjarvis.tools.approval_store import (
+            ApprovalStore,
+            STATUS_APPROVED,
+            STATUS_EXPIRED,
+            STATUS_PENDING,
+            TIER_HIGH,
+        )
+
+        store = ApprovalStore()
+        action = store.queue_action(
+            action_type=f"tool:{tool_call.name}",
+            description=f"Approve execution of '{tool_call.name}'?",
+            payload={"tool": tool_call.name, "arguments": params},
+            permission_key=f"tool:{tool_call.name}",
+            tier=TIER_HIGH,
+            ttl_hours=_WEB_APPROVAL_TIMEOUT_SECONDS / 3600.0,
+        )
+        logger.info(
+            "Tool '%s' requires confirmation; queued web approval %s "
+            "(timeout %.0fs)",
+            tool_call.name,
+            action.id,
+            _WEB_APPROVAL_TIMEOUT_SECONDS,
+        )
+
+        deadline = time.time() + _WEB_APPROVAL_TIMEOUT_SECONDS
+        decision = "timeout"
+        while time.time() < deadline:
+            time.sleep(_WEB_APPROVAL_POLL_INTERVAL_SECONDS)
+            current = store.get_action(action.id)
+            if current is None or current.status != STATUS_PENDING:
+                decision = current.status if current is not None else "timeout"
+                break
+
+        if decision == STATUS_APPROVED:
+            logger.info(
+                "Web approval %s for '%s': APPROVED", action.id, tool_call.name
+            )
+            return action.id, None
+
+        if decision == "timeout":
+            store.update_status(action.id, STATUS_EXPIRED)
+            content = (
+                f"Tool '{tool_call.name}' was not approved within "
+                f"{_WEB_APPROVAL_TIMEOUT_SECONDS:.0f}s and was not executed."
+            )
+        else:
+            content = f"Tool '{tool_call.name}' execution was denied by the user."
+
+        logger.info(
+            "Web approval %s for '%s': %s",
+            action.id,
+            tool_call.name,
+            decision.upper(),
+        )
+        result = ToolResult(tool_name=tool_call.name, content=content, success=False)
+        result.metadata["approval"] = {"action_id": action.id, "decision": decision}
+        return action.id, result
 
     @staticmethod
     def _json_safe_metadata(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
