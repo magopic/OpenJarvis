@@ -30,7 +30,7 @@ class KokoroTTSBackend(TTSBackend):
         try:
             from kokoro import KPipeline
 
-            self._pipeline = KPipeline(lang_code="a")
+            self._pipeline = KPipeline(lang_code="i")
         except ImportError:
             raise RuntimeError(
                 "kokoro package not installed. Install with: pip install kokoro"
@@ -40,7 +40,7 @@ class KokoroTTSBackend(TTSBackend):
         self,
         text: str,
         *,
-        voice_id: str = "af_heart",
+        voice_id: str = "if_sara",
         speed: float = 1.0,
         output_format: str = "wav",
     ) -> TTSResult:
@@ -70,7 +70,7 @@ class KokoroTTSBackend(TTSBackend):
         )
 
     def available_voices(self) -> List[str]:
-        return ["af_heart", "af_bella", "am_adam", "am_michael"]
+        return ["if_sara", "im_nicola"]
 
     def health(self) -> bool:
         try:
