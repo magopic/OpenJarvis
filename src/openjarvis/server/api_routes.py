@@ -928,6 +928,9 @@ async def transcribe_speech(request: Request):
     }
 
 
+_tts_backend_instances: Dict[str, Any] = {}
+
+
 @speech_router.post("/synthesize")
 async def synthesize_speech(req: SpeechSynthesizeRequest):
     """Synthesize text to audio via a registered TTS backend (default: kokoro,
@@ -943,7 +946,13 @@ async def synthesize_speech(req: SpeechSynthesizeRequest):
             status_code=501, detail=f"TTS backend '{req.backend}' not available"
         )
 
-    backend = TTSRegistry.get(req.backend)()
+    # Cache one backend instance per backend_id so its loaded pipeline
+    # (e.g. Kokoro's KPipeline) is reused across requests instead of being
+    # rebuilt from scratch on every call.
+    backend = _tts_backend_instances.get(req.backend)
+    if backend is None:
+        backend = TTSRegistry.get(req.backend)()
+        _tts_backend_instances[req.backend] = backend
     kwargs: Dict[str, Any] = {"speed": req.speed}
     if req.voice_id:
         kwargs["voice_id"] = req.voice_id
