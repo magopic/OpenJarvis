@@ -312,6 +312,28 @@ def serve(
     except Exception as exc:
         logger.warning("Managed-agent MCP tools failed to load: %s", exc)
 
+    # Set up the memory backend for storage tools, API routes, and optional
+    # prompt-context injection. ``context_from_memory`` controls only the last
+    # of those, so disabling it must not leave explicit memory_* tools with a
+    # null backend. Built before tool resolution (below) so memory_* tools on
+    # the primary agent — and the scheduler's ToolExecutor, which reuses
+    # ``resolved_tools`` — actually receive it instead of a bare no-arg
+    # instantiation (#see instantiate_registered_tool).
+    memory_backend = None
+    try:
+        import openjarvis.tools.storage  # noqa: F401
+        from openjarvis.core.registry import MemoryRegistry
+
+        mem_key = config.memory.default_backend
+        if MemoryRegistry.contains(mem_key):
+            memory_backend = MemoryRegistry.create(
+                mem_key,
+                db_path=config.memory.db_path,
+            )
+            console.print("  Memory:    [cyan]active[/cyan]")
+    except Exception as exc:
+        logger.debug("Memory backend init failed: %s", exc)
+
     if agent_key:
         try:
             import openjarvis.agents  # noqa: F401
@@ -326,6 +348,9 @@ def serve(
                 # Load tools for agents that support them
                 if getattr(agent_cls, "accepts_tools", False):
                     import openjarvis.tools  # noqa: F401  # trigger registration
+                    from openjarvis.agents.tool_resolver import (
+                        instantiate_registered_tool,
+                    )
                     from openjarvis.core.registry import ToolRegistry
                     from openjarvis.tools._stubs import BaseTool
 
@@ -339,7 +364,15 @@ def serve(
                         if isinstance(tool_cls, type) and issubclass(
                             tool_cls, BaseTool
                         ):
-                            tools.append(tool_cls())
+                            tools.append(
+                                instantiate_registered_tool(
+                                    tool_cls,
+                                    name,
+                                    engine=engine,
+                                    model=model_name,
+                                    memory_backend=memory_backend,
+                                )
+                            )
                         elif isinstance(tool_cls, BaseTool):
                             tools.append(tool_cls)
 
@@ -492,25 +525,6 @@ def serve(
 
     # Create app
     from openjarvis.server.app import create_app
-
-    # Set up the memory backend for storage tools, API routes, and optional
-    # prompt-context injection. ``context_from_memory`` controls only the last
-    # of those, so disabling it must not leave explicit memory_* tools with a
-    # null backend. Built before the scheduler so AgentExecutor can reuse it.
-    memory_backend = None
-    try:
-        import openjarvis.tools.storage  # noqa: F401
-        from openjarvis.core.registry import MemoryRegistry
-
-        mem_key = config.memory.default_backend
-        if MemoryRegistry.contains(mem_key):
-            memory_backend = MemoryRegistry.create(
-                mem_key,
-                db_path=config.memory.db_path,
-            )
-            console.print("  Memory:    [cyan]active[/cyan]")
-    except Exception as exc:
-        logger.debug("Memory backend init failed: %s", exc)
 
     # Automatic long-term memory service (background fact extraction).
     memory_service = None
