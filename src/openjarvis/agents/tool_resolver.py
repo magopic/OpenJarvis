@@ -30,6 +30,7 @@ _MEMORY_TOOLS = frozenset(
     {"retrieval", "memory_store", "memory_search", "memory_index", "memory_retrieve"}
 )
 _CHANNEL_TOOLS = frozenset({"channel_send", "channel_list", "channel_status"})
+_KNOWLEDGE_TOOLS = frozenset({"knowledge_search", "knowledge_sql", "scan_chunks"})
 
 
 class _SpecOverrideTool:
@@ -235,6 +236,8 @@ def instantiate_registered_tool(
     model: str,
     memory_backend: Any = None,
     channel_backend: Any = None,
+    knowledge_store: Any = None,
+    knowledge_retriever: Any = None,
 ) -> Any:
     """Instantiate a registry tool with its runtime dependencies."""
 
@@ -254,6 +257,18 @@ def instantiate_registered_tool(
                 name,
             )
         return tool_cls(channel=channel_backend)
+    if name in _KNOWLEDGE_TOOLS:
+        if knowledge_store is None and knowledge_retriever is None:
+            logger.warning(
+                "Knowledge tool %r instantiated without a knowledge store — "
+                "calls will return no results.",
+                name,
+            )
+        if name == "knowledge_search":
+            return tool_cls(store=knowledge_store, retriever=knowledge_retriever)
+        if name == "scan_chunks":
+            return tool_cls(store=knowledge_store, engine=engine, model=model)
+        return tool_cls(store=knowledge_store)
     if name == "llm":
         return tool_cls(engine=engine, model=model)
     return tool_cls()
@@ -361,6 +376,39 @@ def resolve_agent_tools(
         if name and name not in mcp_by_name:
             mcp_by_name[name] = tool
 
+    # Non-deep_research agents (e.g. a custom/monitor_operative agent with
+    # "knowledge_search" in its configured tools) previously fell through to
+    # instantiate_registered_tool()'s bare tool_cls() default, since that
+    # dispatcher had no case for knowledge tools — only build_deep_research_tools
+    # wired a store/retriever, and only for agent_type == "deep_research".
+    # Build the same store/retriever once here, generically, so any agent that
+    # actually requests a knowledge tool gets a working one.
+    knowledge_store: Any = None
+    knowledge_retriever: Any = None
+    if agent_record.get("agent_type") != "deep_research":
+        requested = {
+            _spec_name(e) if isinstance(e, Mapping) else e
+            for e in _normalized_tool_config(config.get("tools"))
+        }
+        if requested & _KNOWLEDGE_TOOLS:
+            try:
+                path = Path(knowledge_db_path) if knowledge_db_path else None
+                if path is None:
+                    from openjarvis.core.config import DEFAULT_CONFIG_DIR
+
+                    path = DEFAULT_CONFIG_DIR / "knowledge.db"
+                if path.exists():
+                    from openjarvis.connectors.retriever import TwoStageRetriever
+                    from openjarvis.connectors.store import KnowledgeStore
+
+                    knowledge_store = KnowledgeStore(str(path))
+                    knowledge_retriever = TwoStageRetriever(knowledge_store)
+                    owned_resources.append(knowledge_store)
+            except Exception as exc:
+                logger.warning("Knowledge store init failed: %s", exc)
+                knowledge_store = None
+                knowledge_retriever = None
+
     if agent_record.get("agent_type") == "deep_research":
         granted_tools = build_deep_research_tools(
             engine=engine,
@@ -397,6 +445,8 @@ def resolve_agent_tools(
                             model=model,
                             memory_backend=memory_backend,
                             channel_backend=channel_backend,
+                            knowledge_store=knowledge_store,
+                            knowledge_retriever=knowledge_retriever,
                         )
                     except Exception as exc:
                         logger.warning(
@@ -444,6 +494,8 @@ def resolve_agent_tools(
                         model=model,
                         memory_backend=memory_backend,
                         channel_backend=channel_backend,
+                        knowledge_store=knowledge_store,
+                        knowledge_retriever=knowledge_retriever,
                     )
                 )
             except Exception as exc:
