@@ -53,6 +53,13 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    // Tauri's own build writes into src-tauri/target while Vite's dev server
+    // is running; without this, Vite's fs watcher intermittently locks a
+    // half-written Rust binary on Windows and crashes with EBUSY, killing
+    // the `tauri dev` beforeDevCommand. Standard Tauri+Vite exclusion.
+    watch: {
+      ignored: ['**/src-tauri/**'],
+    },
     proxy: {
       // ws: true is required for the /v1/agents/events WebSocket. Without it
       // Vite proxies the HTTP request but not the upgrade, so the socket never
