@@ -68,7 +68,7 @@ export function useVoiceLoop(model: string) {
     setError(null);
     try {
       const wavBlob = encodeWavPCM16(audio, 16000);
-      const { text, confidence } = await transcribeAudio(wavBlob, 'voice-loop.wav');
+      const { text, confidence } = await transcribeAudio(wavBlob, 'voice-loop.wav', 'it');
       if (!text || !text.trim()) {
         setBoth('listening');
         return;
