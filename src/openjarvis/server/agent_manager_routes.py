@@ -1599,7 +1599,7 @@ def create_agent_manager_router(
         return agent
 
     @agents_router.patch("/{agent_id}")
-    async def update_agent(agent_id: str, req: UpdateAgentRequest):
+    async def update_agent(agent_id: str, req: UpdateAgentRequest, request: Request):
         if not manager.get_agent(agent_id):
             raise HTTPException(status_code=404, detail="Agent not found")
         kwargs: Dict[str, Any] = {}
@@ -1609,13 +1609,30 @@ def create_agent_manager_router(
             kwargs["agent_type"] = req.agent_type
         if req.config is not None:
             kwargs["config"] = req.config
-        return manager.update_agent(agent_id, **kwargs)
+        updated = manager.update_agent(agent_id, **kwargs)
+
+        # Re-register with the live scheduler when the schedule config
+        # changed — mirrors create_agent's registration below, otherwise a
+        # PATCHed schedule silently has no effect until the next restart.
+        if req.config is not None:
+            scheduler = getattr(request.app.state, "agent_scheduler", None)
+            if scheduler:
+                sched_type = (req.config or {}).get("schedule_type", "manual")
+                if sched_type in ("cron", "interval"):
+                    scheduler.register_agent(agent_id)
+                else:
+                    scheduler.deregister_agent(agent_id)
+
+        return updated
 
     @agents_router.delete("/{agent_id}")
-    async def delete_agent(agent_id: str):
+    async def delete_agent(agent_id: str, request: Request):
         if not manager.get_agent(agent_id):
             raise HTTPException(status_code=404, detail="Agent not found")
         manager.delete_agent(agent_id)
+        scheduler = getattr(request.app.state, "agent_scheduler", None)
+        if scheduler:
+            scheduler.deregister_agent(agent_id)
         return {"status": "archived"}
 
     @agents_router.post("/{agent_id}/pause")
