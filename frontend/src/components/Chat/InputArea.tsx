@@ -7,7 +7,9 @@ import { fetchSavings, getBase } from '../../lib/api';
 import { listConnectors, getSyncStatus } from '../../lib/connectors-api';
 import { serializeToolCallArguments } from '../../lib/tool-call';
 import { MicButton } from './MicButton';
+import { VoiceLoopButton } from './VoiceLoopButton';
 import { useSpeech } from '../../hooks/useSpeech';
+import { useVoiceLoop } from '../../hooks/useVoiceLoop';
 import type {
   ChatMessage,
   MessageTelemetry,
@@ -106,6 +108,54 @@ export function InputArea() {
     startRecording,
     stopRecording,
   } = useSpeech();
+
+  const voiceLoop = useVoiceLoop(selectedModel || '');
+  const lastPushedTranscriptRef = useRef('');
+  const lastPushedReplyRef = useRef('');
+
+  // Mirror hands-free turns into the visible conversation, using the same
+  // addMessage/createConversation path as a normal typed message.
+  useEffect(() => {
+    if (!voiceLoop.transcript || voiceLoop.transcript === lastPushedTranscriptRef.current) return;
+    lastPushedTranscriptRef.current = voiceLoop.transcript;
+    let convId = activeId;
+    if (!convId && selectedModel) convId = createConversation(selectedModel);
+    if (!convId) return;
+    addMessage(convId, {
+      id: generateId(),
+      role: 'user',
+      content: voiceLoop.transcript,
+      timestamp: Date.now(),
+    });
+  }, [voiceLoop.transcript, activeId, selectedModel, createConversation, addMessage]);
+
+  useEffect(() => {
+    if (!voiceLoop.reply || voiceLoop.reply === lastPushedReplyRef.current) return;
+    lastPushedReplyRef.current = voiceLoop.reply;
+    if (!activeId) return;
+    addMessage(activeId, {
+      id: generateId(),
+      role: 'assistant',
+      content: voiceLoop.reply,
+      timestamp: Date.now(),
+    });
+  }, [voiceLoop.reply, activeId, addMessage]);
+
+  useEffect(() => {
+    if (voiceLoop.error) toast.error(voiceLoop.error, { duration: 8000 });
+  }, [voiceLoop.error]);
+
+  const handleVoiceLoopClick = useCallback(async () => {
+    if (voiceLoop.active) {
+      await voiceLoop.stop();
+    } else {
+      try {
+        await voiceLoop.start();
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Failed to start voice mode', { duration: 8000 });
+      }
+    }
+  }, [voiceLoop]);
 
   // Abort in-flight stream when the user switches models mid-generation.
   // This prevents errors from trying to continue a stream with a stale model.
@@ -620,6 +670,12 @@ export function InputArea() {
               state={speechState}
               onClick={handleMicClick}
               disabled={micDisabled}
+              reason={micReason}
+            />
+            <VoiceLoopButton
+              state={voiceLoop.state}
+              onClick={handleVoiceLoopClick}
+              disabled={(micDisabled && !voiceLoop.active) || (streamState.isStreaming && !voiceLoop.active)}
               reason={micReason}
             />
             <button

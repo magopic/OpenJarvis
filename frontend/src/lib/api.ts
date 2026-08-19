@@ -378,6 +378,25 @@ export async function fetchSpeechHealth(): Promise<SpeechHealth> {
   return res.json();
 }
 
+export async function synthesizeSpeech(text: string, backend = 'kokoro'): Promise<Blob> {
+  const res = await apiFetch(`/v1/speech/synthesize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, backend }),
+  });
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const body = await res.json();
+      detail = typeof body.detail === 'string' ? body.detail : '';
+    } catch {
+      // Keep the status-only message below when the body is not JSON.
+    }
+    throw new Error(detail || `Speech synthesis failed: ${res.status}`);
+  }
+  return res.blob();
+}
+
 // ---------------------------------------------------------------------------
 // Agent Manager
 // ---------------------------------------------------------------------------
