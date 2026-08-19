@@ -9,6 +9,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,13 @@ class FeedbackScoreRequest(BaseModel):
     trace_id: str
     score: float
     source: str = "api"
+
+
+class SpeechSynthesizeRequest(BaseModel):
+    text: str
+    backend: str = "kokoro"
+    voice_id: str = ""
+    speed: float = 1.0
 
 
 class OptimizeRunRequest(BaseModel):
@@ -918,6 +926,37 @@ async def transcribe_speech(request: Request):
         "confidence": result.confidence,
         "duration_seconds": result.duration_seconds,
     }
+
+
+@speech_router.post("/synthesize")
+async def synthesize_speech(req: SpeechSynthesizeRequest):
+    """Synthesize text to audio via a registered TTS backend (default: kokoro,
+    local/offline). Reuses the same TTSRegistry as the text_to_speech tool."""
+    import openjarvis.speech  # noqa: F401 — ensure TTS backends are registered
+    from openjarvis.core.registry import TTSRegistry
+
+    if not req.text:
+        raise HTTPException(status_code=400, detail="Missing 'text'")
+
+    if not TTSRegistry.contains(req.backend):
+        raise HTTPException(
+            status_code=501, detail=f"TTS backend '{req.backend}' not available"
+        )
+
+    backend = TTSRegistry.get(req.backend)()
+    kwargs: Dict[str, Any] = {"speed": req.speed}
+    if req.voice_id:
+        kwargs["voice_id"] = req.voice_id
+    try:
+        result = await asyncio.to_thread(backend.synthesize, req.text, **kwargs)
+    except Exception as exc:
+        logger.exception("Speech synthesis failed")
+        raise HTTPException(
+            status_code=500, detail=f"Speech synthesis failed: {exc}"
+        ) from exc
+
+    media_type = "audio/wav" if result.format == "wav" else f"audio/{result.format}"
+    return Response(content=result.audio, media_type=media_type)
 
 
 @speech_router.get("/health")
