@@ -465,6 +465,22 @@ class SystemBuilder:
             else:
                 tool_names = []
 
+            # Union in governance-passing OPS Bridge tools (see
+            # ops_bridge_generic.py) so they reach the agent without being
+            # hand-added to config.toml. Only applies to the config-derived
+            # list -- an explicit self._tool_names override (used by evals
+            # for tight sandboxing) is left untouched.
+            try:
+                from openjarvis.tools.ops_bridge_generic import (
+                    get_auto_enabled_ops_tool_ids,
+                )
+
+                for auto_id in get_auto_enabled_ops_tool_ids():
+                    if auto_id not in tool_names:
+                        tool_names.append(auto_id)
+            except Exception:
+                pass
+
         if tool_names:
             all_tools = {t.spec.name: t for t in internal_server.get_tools()}
             tools = [all_tools[n] for n in tool_names if n in all_tools]

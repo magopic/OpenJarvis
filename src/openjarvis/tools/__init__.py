@@ -157,10 +157,14 @@ try:
 except ImportError:
     pass
 
-# Generic OPS Bridge adapter (FASE 4G): discovers TRUSTED, non-approval
-# capabilities from the Bridge's own Registry and registers one tool per
-# capability found. Best-effort -- if the Bridge is unreachable, this
-# registers nothing and OpenJarvis starts up exactly as before.
+# Generic OPS Bridge adapter (FASE 4G, governance policy FASE 4I): discovers
+# capabilities from the Bridge's own Registry, keeps only ones that are
+# TRUSTED, non-approval, and category READ/KNOWLEDGE, and registers one tool
+# per capability found -- those that pass also auto-enable for chat without
+# needing a config.toml entry (see get_auto_enabled_ops_tool_ids, consumed
+# by SystemBuilder._resolve_tools and serve.py's _resolve_allowed_tools).
+# Best-effort -- if the Bridge is unreachable, this registers nothing and
+# OpenJarvis starts up exactly as before.
 try:
     from openjarvis.tools.ops_bridge_generic import (
         discover_and_register_ops_bridge_tools,

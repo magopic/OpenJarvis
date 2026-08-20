@@ -28,26 +28,50 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TOOLS = frozenset({"think", "calculator", "web_search"})
 
 
+def _auto_enabled_ops_tool_ids() -> set[str]:
+    """OPS Bridge tools that passed governance and auto-enable for chat.
+
+    Fails closed: any import/discovery problem (OPS Bridge offline, module
+    missing, etc.) yields an empty set rather than raising, so tool
+    resolution never breaks over an optional integration.
+    """
+    try:
+        from openjarvis.tools.ops_bridge_generic import (
+            get_auto_enabled_ops_tool_ids,
+        )
+
+        return set(get_auto_enabled_ops_tool_ids())
+    except Exception:
+        return set()
+
+
 def _resolve_allowed_tools(config: object) -> tuple[set[str], bool]:
     """Return configured tool names and whether the selection was explicit.
 
     ``tools.enabled`` is the canonical setting used by ``SystemBuilder`` and
     the interactive CLI.  ``agent.tools`` remains as a backward-compatible
     fallback, followed by the server's default tool set when neither is set.
+
+    Governance-passing OPS Bridge tools (see ops_bridge_generic.py) are
+    unioned in regardless of which branch above applies, so they reach chat
+    without being hand-added to config.toml.
     """
     configured = config.tools.enabled or config.agent.tools
     if not configured:
-        return set(_DEFAULT_TOOLS), False
-
-    if isinstance(configured, list):
+        allowed, explicit = set(_DEFAULT_TOOLS), False
+    elif isinstance(configured, list):
         allowed = {
             tool.strip()
             for tool in configured
             if isinstance(tool, str) and tool.strip()
         }
+        explicit = True
     else:
         allowed = {tool.strip() for tool in configured.split(",") if tool.strip()}
-    return allowed, True
+        explicit = True
+
+    allowed |= _auto_enabled_ops_tool_ids()
+    return allowed, explicit
 
 
 def _unique_model_ids(model_ids: list[str]) -> list[str]:

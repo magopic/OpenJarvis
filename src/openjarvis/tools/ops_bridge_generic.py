@@ -36,6 +36,38 @@ _DISCOVERY_TIMEOUT_SECONDS = 2.0
 _CALL_TIMEOUT_SECONDS = 30.0
 _TOOL_ID_PREFIX = "ops_dynamic_"
 
+# Governance policy (FASE 4I): a capability may be auto-enabled for chat only
+# if trust_status == TRUSTED, requires_approval == False, and category is one
+# of these. Anything else (ACTION, PARTIAL/UNTRUSTED/NOT_IMPLEMENTED trust,
+# requires_approval=true, or missing/unknown metadata) fails closed.
+_AUTO_ENABLE_CATEGORIES = {"READ", "KNOWLEDGE"}
+
+# Infrastructural capabilities that the Generic Adapter itself calls for
+# discovery and has no reason to expose as an LLM-facing chat tool, even
+# though they pass governance and stay registered in ToolRegistry.
+_INTERNAL_ONLY_CAPABILITIES = {_LIST_CAPABILITY}
+
+# Populated by discover_and_register_ops_bridge_tools(); read by the two
+# existing config.tools.enabled consumers (SystemBuilder._resolve_tools and
+# serve.py's _resolve_allowed_tools) so a TRUSTED/READ|KNOWLEDGE capability
+# is available to chat without being hand-added to config.toml.
+_auto_enabled_tool_ids: List[str] = []
+
+
+def _passes_governance(capability: Dict[str, Any]) -> bool:
+    """Fail closed on anything missing, invalid, or outside the policy."""
+    name = capability.get("name")
+    if not isinstance(name, str) or not name:
+        return False
+    if capability.get("trust_status") != "TRUSTED":
+        return False
+    if capability.get("requires_approval") is not False:
+        return False
+    category = capability.get("category")
+    if category not in _AUTO_ENABLE_CATEGORIES:
+        return False
+    return True
+
 
 def _bridge_base_url() -> str:
     return os.environ.get("OPS_BRIDGE_BASE_URL", _DEFAULT_BASE_URL).rstrip("/")
@@ -145,45 +177,72 @@ def _make_dynamic_tool_class(capability: Dict[str, Any]) -> Type[BaseTool]:
 
 
 def discover_and_register_ops_bridge_tools() -> List[str]:
-    """Discover TRUSTED, non-approval capabilities and register a tool for each.
+    """Discover governance-passing capabilities and register a tool for each.
+
+    A capability that fails the governance policy (_passes_governance) is not
+    registered at all -- fail closed applies to ToolRegistry visibility, not
+    just chat auto-enablement, so nothing dormant-but-unsafe sits around.
 
     Returns the list of tool_ids registered. Never raises -- any failure to
     reach the Bridge (not running, network error, malformed response) results
     in an empty list, matching the try/except-and-skip convention every other
     optional tool in tools/__init__.py already follows.
+
+    Also refreshes the module's auto-enable list (see
+    get_auto_enabled_ops_tool_ids) to exactly the tool_ids registered by this
+    run that are meant to reach chat -- i.e. governance-passing capabilities
+    minus the internal-only ones (see _INTERNAL_ONLY_CAPABILITIES).
     """
+    global _auto_enabled_tool_ids
+
     try:
         envelope = _call_bridge_for_discovery()
     except Exception:
+        _auto_enabled_tool_ids = []
         return []
 
     if envelope.get("status") != "ok":
+        _auto_enabled_tool_ids = []
         return []
     capabilities = ((envelope.get("data") or {}).get("capabilities")) or []
     if not isinstance(capabilities, list):
+        _auto_enabled_tool_ids = []
         return []
 
     registered: List[str] = []
+    auto_enabled: List[str] = []
     for capability in capabilities:
         if not isinstance(capability, dict):
             continue
-        if capability.get("trust_status") != "TRUSTED":
+        if not _passes_governance(capability):
             continue
-        if capability.get("requires_approval", True) is not False:
-            continue
-        name = capability.get("name")
-        if not isinstance(name, str) or not name:
-            continue
+        name = capability["name"]
         tool_id = _capability_to_tool_id(name)
-        if ToolRegistry.contains(tool_id):
-            continue
-        try:
-            tool_cls = _make_dynamic_tool_class(capability)
-            ToolRegistry.register_value(tool_id, tool_cls)
-            registered.append(tool_id)
-        except Exception:
-            continue
+        if not ToolRegistry.contains(tool_id):
+            try:
+                tool_cls = _make_dynamic_tool_class(capability)
+                ToolRegistry.register_value(tool_id, tool_cls)
+            except Exception:
+                continue
+        registered.append(tool_id)
+        if name not in _INTERNAL_ONLY_CAPABILITIES:
+            auto_enabled.append(tool_id)
+
+    _auto_enabled_tool_ids = auto_enabled
     return registered
+
+
+def get_auto_enabled_ops_tool_ids() -> List[str]:
+    """Tool ids that passed governance and should reach chat automatically.
+
+    Consumed by the two existing config.tools.enabled resolvers
+    (SystemBuilder._resolve_tools, serve.py's _resolve_allowed_tools) so a
+    TRUSTED READ/KNOWLEDGE capability is available without being hand-added
+    to config.toml. Never raises; returns [] if discovery hasn't run or
+    found nothing -- callers should treat that as "no OPS tools available",
+    not as an error.
+    """
+    return list(_auto_enabled_tool_ids)
 
 
 def _call_bridge_for_discovery() -> Dict[str, Any]:
@@ -197,4 +256,7 @@ def _call_bridge_for_discovery() -> Dict[str, Any]:
     return response.json()
 
 
-__all__ = ["discover_and_register_ops_bridge_tools"]
+__all__ = [
+    "discover_and_register_ops_bridge_tools",
+    "get_auto_enabled_ops_tool_ids",
+]
