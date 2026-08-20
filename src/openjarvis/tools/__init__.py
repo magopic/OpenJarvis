@@ -157,4 +157,17 @@ try:
 except ImportError:
     pass
 
+# Generic OPS Bridge adapter (FASE 4G): discovers TRUSTED, non-approval
+# capabilities from the Bridge's own Registry and registers one tool per
+# capability found. Best-effort -- if the Bridge is unreachable, this
+# registers nothing and OpenJarvis starts up exactly as before.
+try:
+    from openjarvis.tools.ops_bridge_generic import (
+        discover_and_register_ops_bridge_tools,
+    )
+
+    discover_and_register_ops_bridge_tools()
+except Exception:
+    pass
+
 __all__ = ["BaseTool", "ToolExecutor", "ToolSpec"]
