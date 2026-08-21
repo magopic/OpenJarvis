@@ -9,6 +9,28 @@ from openjarvis.core.paths import get_config_dir
 
 PromptCacheSegment = Literal["frozen_prefix", "dynamic_suffix"]
 
+# FASE 4M.5A: minimal, runtime-agnostic grounding rule. Deliberately generic
+# -- no business name, no domain vocabulary, no hardcoded number, threshold,
+# or example value from any specific deployment. This exists because an
+# audit (FASE 4M.5) found the tool-calling system prompt built by this class
+# carried no instruction at all distinguishing tool-returned business facts
+# from the model's own general knowledge, and no instruction to respect the
+# trust/period metadata tools already return -- see FASE 4M.5's audit and
+# FASE 4M.5A's fix to ops_bridge_generic.py's _summarize() (which is what
+# actually starts surfacing period_status/reason for this rule to act on).
+# Always included: harmless and still correct even in a session with no
+# business-data tools connected at all.
+_TOOL_GROUNDING_RULE = """## Tool Grounding & Trust Discipline
+
+When you have access to tools that return business/operational data (numbers, KPIs, targets, benchmarks, operational status, or other factual claims about a real organization):
+
+- Treat the data those tools return as the authoritative source for any such fact. Do not substitute your own general knowledge or inference for a number, target, benchmark, or status a tool could supply.
+- If a tool result includes a trust or validation indicator (e.g. a field named like `trust_status`, `period_status`, `provenance`, `confidence_status`, `limitations`, or a `reason` explaining a caveat), honor it in your answer. Do not upgrade an uncertain or unvalidated result into a confident, certified-sounding claim.
+- A result meaning "no data available for this" is not the same as a result of zero. Say explicitly when data is unavailable rather than treating absence as a value.
+- If a tool result is explicitly marked as not yet validated, in review, or otherwise not certified, say so plainly rather than presenting it as settled fact.
+- If no tool can supply a threshold, target, or benchmark you would need to judge whether a value is good or bad, say that you don't have a certified reference for it instead of inventing one from general knowledge or industry norms.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class PromptSection:
@@ -147,6 +169,14 @@ class SystemPromptBuilder:
                     cache_segment="frozen_prefix",
                 )
             )
+        sections.append(
+            PromptSection(
+                name="tool_grounding_discipline",
+                content=_TOOL_GROUNDING_RULE,
+                source="builtin",
+                cache_segment="frozen_prefix",
+            )
+        )
         sections.extend(self._persona_prompt_sections())
         # XML skill catalog (preferred over legacy markdown list)
         if self._skill_catalog_xml:

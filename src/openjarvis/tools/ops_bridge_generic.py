@@ -142,13 +142,33 @@ def _compact_for_context(
 
 
 def _summarize(envelope: Dict[str, Any]) -> str:
+    # FASE 4M.5A: propagate two fields the Bridge already computes and
+    # returns, which this function was previously dropping before they ever
+    # reached the model. Neither is reinterpreted or reclassified here --
+    # both are relayed exactly as the Bridge/capability set them:
+    #   - period_status (REAL_DATA/REAL_ZERO/DATA_NOT_AVAILABLE/
+    #     FUTURE_PERIOD/PARTIAL_PERIOD): a top-level envelope field, sibling
+    #     to `data`, set by classifyPeriodStatus() on the OPS ONE side --
+    #     this file must never duplicate that classification, only surface
+    #     the value it's given.
+    #   - reason: already included below for non-'ok' responses; also now
+    #     included for 'ok' responses when present (e.g. a KNOWLEDGE
+    #     capability response that is 'ok' but carries an explicit
+    #     not-certified caveat, such as BUSINESS_LOGIC_IN_REVISION).
+    # Neither addition touches `data` or interacts with
+    # _compact_for_context's budget check below, which only measures `data`.
     status = envelope.get("status")
-    if status != "ok":
-        return f"status={status} period={envelope.get('period')} reason={envelope.get('reason')}"
+    period_status = envelope.get("period_status")
+    period_status_part = f" period_status={period_status}" if period_status else ""
 
+    if status != "ok":
+        return f"status={status} period={envelope.get('period')}{period_status_part} reason={envelope.get('reason')}"
+
+    reason = envelope.get("reason")
+    reason_part = f" reason={reason}" if reason else ""
     prefix = (
-        f"status=ok source={envelope.get('source')} period={envelope.get('period')} "
-        f"confidence_status={envelope.get('confidence_status')}"
+        f"status=ok source={envelope.get('source')} period={envelope.get('period')}"
+        f"{period_status_part} confidence_status={envelope.get('confidence_status')}{reason_part}"
     )
     compacted, truncated = _compact_for_context(envelope.get("data"))
     if truncated:
