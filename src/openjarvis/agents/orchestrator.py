@@ -18,11 +18,23 @@ import re
 from typing import Any, List, Optional
 
 from openjarvis.agents._stubs import AgentContext, AgentResult, ToolUsingAgent
+from openjarvis.agents.operational_evidence import build_evidence
 from openjarvis.core.events import EventBus
 from openjarvis.core.registry import AgentRegistry
 from openjarvis.core.types import Message, Role, ToolCall, ToolResult
 from openjarvis.engine._stubs import InferenceEngine
 from openjarvis.tools._stubs import BaseTool
+
+# FASE 4M.5B: bounded dynamic re-routing. tool_router.py's own selection
+# (select_relevant_tools) is reused unchanged -- this only widens how many
+# of its already-scored candidates are included, and only across turns
+# where the conversation is genuinely continuing (the model made a tool
+# call and needs another turn), never by loading the full catalog. Capped
+# so a long tool-calling conversation can't creep toward offering every
+# registered tool.
+_ROUTING_BASE_TOP_N = 5
+_ROUTING_EXPANSION_STEP = 2
+_ROUTING_MAX_EXPANSIONS = 2
 
 
 @AgentRegistry.register("orchestrator")
@@ -307,21 +319,42 @@ class OrchestratorAgent(ToolUsingAgent):
         # trims what is *shown to the model this turn*; the underlying
         # enabled-tools set (config.toml + auto-enable governance) is
         # untouched.
-        if self._tools:
+        routing_expansions_used = 0
+
+        def _route_tools(top_n: int) -> list[dict]:
+            if not self._tools:
+                return []
             from openjarvis.agents.tool_router import select_relevant_tools
 
-            routed_tools = select_relevant_tools(self._tools, input)
-            openai_tools = [t.to_openai_function() for t in routed_tools]
-        else:
-            openai_tools = []
+            routed_tools = select_relevant_tools(self._tools, input, top_n=top_n)
+            return [t.to_openai_function() for t in routed_tools]
+
+        openai_tools = _route_tools(_ROUTING_BASE_TOP_N)
 
         all_tool_results: list[ToolResult] = []
         turns = 0
         total_prompt_tokens = 0
         total_completion_tokens = 0
+        made_tool_call_last_turn = False
 
         for _turn in range(self._max_turns):
             turns += 1
+
+            # FASE 4M.5B: bounded dynamic re-routing. Only widen the offered
+            # tool set on a turn where the conversation is genuinely
+            # continuing (the previous turn made a tool call), and only up
+            # to _ROUTING_MAX_EXPANSIONS times -- reuses select_relevant_tools
+            # unchanged, never loads the full catalog.
+            if (
+                turns > 1
+                and made_tool_call_last_turn
+                and routing_expansions_used < _ROUTING_MAX_EXPANSIONS
+                and self._tools
+            ):
+                routing_expansions_used += 1
+                openai_tools = _route_tools(
+                    _ROUTING_BASE_TOP_N + routing_expansions_used * _ROUTING_EXPANSION_STEP
+                )
 
             if self._loop_guard:
                 messages = self._loop_guard.compress_context(messages)
@@ -452,6 +485,19 @@ class OrchestratorAgent(ToolUsingAgent):
                             name=tc.name,
                         )
                     )
+
+            made_tool_call_last_turn = True
+
+            # FASE 4M.5B: OperationalEvidence -- a structural recap of every
+            # FACT/KNOWLEDGE/LIMITATION gathered so far (from ToolResult.metadata,
+            # i.e. the Bridge envelopes already returned this conversation),
+            # with per-item trust_status/period_status and a domain-coverage
+            # count. No new fact or judgment is computed here -- see
+            # operational_evidence.py. Injected as a system message so the
+            # next turn's model call can see it distinctly from the tool
+            # results themselves.
+            evidence_note = build_evidence(all_tool_results).render_note()
+            messages.append(Message(role=Role.SYSTEM, content=evidence_note))
 
         # Max turns exceeded
         final_content = self._strip_think_tags(content) if content else ""
