@@ -99,11 +99,30 @@ def chat(
 
     # Resolve agent (optional)
     agent = None
+    agent_explicitly_set = agent_name is not None
     agent_key = agent_name or config.agent.default_agent
     if agent_key and agent_key != "none":
         try:
             import openjarvis.agents  # noqa: F401 — trigger registration
             from openjarvis.core.registry import AgentRegistry
+
+            # MAIA-safe upgrade -- see ask.py for the identical rationale:
+            # only overrides a non-tool-capable, non-explicit default when
+            # OPS Bridge tools have actually passed governance for
+            # auto-enable. No-op on non-MAIA installs.
+            if not agent_explicitly_set and AgentRegistry.contains(agent_key):
+                _candidate_cls = AgentRegistry.get(agent_key)
+                if (
+                    not getattr(_candidate_cls, "accepts_tools", False)
+                    and AgentRegistry.contains("orchestrator")
+                ):
+                    import openjarvis.tools  # noqa: F401 — trigger registration
+                    from openjarvis.tools.ops_bridge_generic import (
+                        get_auto_enabled_ops_tool_ids,
+                    )
+
+                    if get_auto_enabled_ops_tool_ids():
+                        agent_key = "orchestrator"
 
             if AgentRegistry.contains(agent_key):
                 agent_cls = AgentRegistry.get(agent_key)

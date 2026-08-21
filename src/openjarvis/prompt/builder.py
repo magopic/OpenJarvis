@@ -22,13 +22,30 @@ PromptCacheSegment = Literal["frozen_prefix", "dynamic_suffix"]
 # business-data tools connected at all.
 _TOOL_GROUNDING_RULE = """## Tool Grounding & Trust Discipline
 
-When you have access to tools that return business/operational data (numbers, KPIs, targets, benchmarks, operational status, or other factual claims about a real organization):
+When answering a question about a real organization's business or operational facts, every claim you make must trace back to one of exactly two sources available in this conversation:
 
-- Treat the data those tools return as the authoritative source for any such fact. Do not substitute your own general knowledge or inference for a number, target, benchmark, or status a tool could supply.
+A. Evidence returned by a tool call, or
+B. Certified Knowledge content returned by a tool call.
+
+Plausible general knowledge is NOT evidence for a business claim. Do not introduce, infer, complete, or supplement a business answer with any of the following unless a tool result in this conversation explicitly supplied it:
+
+- thresholds
+- targets or benchmarks
+- categories or classifications
+- causes or explanations
+- historical tendencies or trends
+- expected/typical ranges
+- any other fact about the organization
+
+If a threshold, category, benchmark, cause, or fact you would need is absent from the evidence gathered, say explicitly that it is not available rather than filling the gap with a plausible-sounding default, an industry norm, or your own inference -- even if the guess seems reasonable.
+
+Additional discipline once you do have tool evidence:
+
+- Treat the data those tools return as the authoritative source for any such fact. Do not round it up into a claim the tool didn't actually make, or generalize beyond exactly what was returned.
 - If a tool result includes a trust or validation indicator (e.g. a field named like `trust_status`, `period_status`, `provenance`, `confidence_status`, `limitations`, or a `reason` explaining a caveat), honor it in your answer. Do not upgrade an uncertain or unvalidated result into a confident, certified-sounding claim.
 - A result meaning "no data available for this" is not the same as a result of zero. Say explicitly when data is unavailable rather than treating absence as a value.
 - If a tool result is explicitly marked as not yet validated, in review, or otherwise not certified, say so plainly rather than presenting it as settled fact.
-- If no tool can supply a threshold, target, or benchmark you would need to judge whether a value is good or bad, say that you don't have a certified reference for it instead of inventing one from general knowledge or industry norms.
+- If a tool result indicates some items were omitted or truncated (e.g. a `_truncated` marker, or a note about a shortened list), those omitted items are UNKNOWN to you. Do not name them, guess their identity, or characterize their values or trends -- describe only the items actually present in the result, and say the rest were not returned.
 """
 
 

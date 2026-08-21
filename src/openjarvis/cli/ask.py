@@ -729,6 +729,39 @@ def ask(
         if configured_default:
             agent_name = configured_default
 
+    # MAIA-safe upgrade: if the resolved default agent can't call tools and
+    # OPS Bridge tools have passed governance for auto-enable (see
+    # ops_bridge_generic.get_auto_enabled_ops_tool_ids), route to
+    # "orchestrator" instead -- otherwise business queries would silently
+    # be answered with no tool access and no way to notice. Only applies
+    # when --agent wasn't explicitly passed; non-MAIA installs (no Bridge,
+    # no auto-enabled capabilities) see no behavior change, and the
+    # configured default remains reachable via `--agent <name>`.
+    if not agent_explicitly_set and agent_name:
+        try:
+            import openjarvis.agents  # noqa: F401 -- trigger registration
+            from openjarvis.core.registry import AgentRegistry
+
+            current_cls = (
+                AgentRegistry.get(agent_name)
+                if AgentRegistry.contains(agent_name)
+                else None
+            )
+            if (
+                current_cls is not None
+                and not getattr(current_cls, "accepts_tools", False)
+                and AgentRegistry.contains("orchestrator")
+            ):
+                import openjarvis.tools  # noqa: F401 -- trigger registration
+                from openjarvis.tools.ops_bridge_generic import (
+                    get_auto_enabled_ops_tool_ids,
+                )
+
+                if get_auto_enabled_ops_tool_ids():
+                    agent_name = "orchestrator"
+        except Exception:
+            pass
+
     # Vision flows only through direct-to-engine mode. If an image/screenshot
     # was supplied without an explicit --agent, route to direct mode so the
     # picture reaches the model; if an agent was explicitly requested, say

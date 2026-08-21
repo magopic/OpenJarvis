@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
 from openjarvis.core.types import ToolResult
+from openjarvis.tools.ops_bridge_generic import _compact_for_context
 
 # The one structural marker this module relies on: which dynamic tool is the
 # Knowledge capability, so its results are classified as KNOWLEDGE rather
@@ -153,7 +154,21 @@ def build_evidence(tool_results: List[ToolResult]) -> OperationalEvidence:
                 evidence.limitations.append(f"[{domain or tr.tool_name}] {status}: {reason}")
             continue
 
-        data = envelope.get("data") or {}
+        raw_data = envelope.get("data") or {}
+        # Apply the same generic, capability-agnostic truncation the tool
+        # result text already went through (ops_bridge_generic._summarize).
+        # Without this, a list field trimmed for the model in the tool-call
+        # turn would reappear here in full via the untruncated envelope --
+        # silently leaking the omitted items back into context and letting
+        # the model "see" (and name) records it was told were not returned.
+        data, was_truncated = _compact_for_context(raw_data)
+        if was_truncated:
+            evidence.limitations.append(
+                f"[{domain or tr.tool_name}] One or more list fields in this "
+                "result were truncated for size; the omitted items are "
+                "UNKNOWN -- do not name, guess, or characterize them, only "
+                "the items actually present above."
+            )
 
         if is_knowledge:
             data_domain = data.get("domain") if isinstance(data, dict) else None

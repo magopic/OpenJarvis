@@ -493,11 +493,20 @@ class OrchestratorAgent(ToolUsingAgent):
             # i.e. the Bridge envelopes already returned this conversation),
             # with per-item trust_status/period_status and a domain-coverage
             # count. No new fact or judgment is computed here -- see
-            # operational_evidence.py. Injected as a system message so the
-            # next turn's model call can see it distinctly from the tool
-            # results themselves.
+            # operational_evidence.py.
+            #
+            # FASE 4M.5E: sent as role="user", not "system". Several chat
+            # templates (e.g. Qwen3.5's, observed live against llama-server)
+            # hard-reject a system-role message anywhere but the first
+            # position ("System message must be at the beginning"), which
+            # would crash every orchestrated turn on those backends. The
+            # note's own "[OPERATIONAL EVIDENCE COLLECTED THIS TURN]" header
+            # already marks it as a structural/automated note rather than
+            # something the human said, so no rewording was needed -- this
+            # mirrors the identical fix already used for the same
+            # constraint in engine/_openai_compat.py's finalization retry.
             evidence_note = build_evidence(all_tool_results).render_note()
-            messages.append(Message(role=Role.SYSTEM, content=evidence_note))
+            messages.append(Message(role=Role.USER, content=evidence_note))
 
         # Max turns exceeded
         final_content = self._strip_think_tags(content) if content else ""
