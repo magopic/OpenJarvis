@@ -301,8 +301,19 @@ class OrchestratorAgent(ToolUsingAgent):
             system_prompt=self._system_prompt,
         )
 
-        # Get OpenAI-format tool definitions
-        openai_tools = self._executor.get_openai_tools() if self._tools else []
+        # Get OpenAI-format tool definitions. FASE 4L.2C: route the OPS
+        # Bridge dynamic tool subset per-turn instead of serializing every
+        # enabled tool's schema unconditionally -- see tool_router.py. Only
+        # trims what is *shown to the model this turn*; the underlying
+        # enabled-tools set (config.toml + auto-enable governance) is
+        # untouched.
+        if self._tools:
+            from openjarvis.agents.tool_router import select_relevant_tools
+
+            routed_tools = select_relevant_tools(self._tools, input)
+            openai_tools = [t.to_openai_function() for t in routed_tools]
+        else:
+            openai_tools = []
 
         all_tool_results: list[ToolResult] = []
         turns = 0

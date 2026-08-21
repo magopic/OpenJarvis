@@ -21,6 +21,7 @@ Registry reports instead of one hardcoded capability.
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any, Dict, List, Type
 
@@ -35,6 +36,16 @@ _LIST_CAPABILITY = "ops.registry.list_capabilities"
 _DISCOVERY_TIMEOUT_SECONDS = 2.0
 _CALL_TIMEOUT_SECONDS = 30.0
 _TOOL_ID_PREFIX = "ops_dynamic_"
+
+# FASE 4L.2C: generic size control for what gets reinjected into the LLM's
+# context on the tool-result turn. The Bridge itself always returns the full
+# envelope untouched (see ToolResult.metadata below) -- only the *summary
+# text* fed back to the model is shape-limited here, and only when it would
+# actually be large. Not tuned to any specific capability's field names:
+# any top-level list-valued field in `data`, from any current or future
+# capability, is subject to the same generic truncation.
+_SUMMARY_CHAR_BUDGET = 1500
+_MAX_LIST_ITEMS_IN_SUMMARY = 5
 
 # Governance policy (FASE 4I): a capability may be auto-enabled for chat only
 # if trust_status == TRUSTED, requires_approval == False, and category is one
@@ -92,11 +103,65 @@ def _schema_to_tool_parameters(input_schema: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _compact_for_context(
+    data: Any, *, budget_chars: int = _SUMMARY_CHAR_BUDGET, max_items: int = _MAX_LIST_ITEMS_IN_SUMMARY
+) -> "tuple[Any, bool]":
+    """Generic (capability-agnostic) size control for the LLM-facing summary.
+
+    Only triggers when the JSON-serialized `data` object exceeds
+    `budget_chars`. When it does, any top-level field whose value is a list
+    longer than `max_items` is truncated to the first `max_items` entries,
+    with `<field>_returned_count`/`<field>_total_count`/`<field>_truncated`
+    markers added alongside it. Scalar fields and short lists are left
+    exactly as-is. Discovers what to truncate purely from shape (is this
+    value a list, is it long) -- no field name from any specific capability
+    is referenced, so this applies unchanged to any future capability that
+    returns a large list under any key.
+    """
+    if not isinstance(data, dict):
+        return data, False
+    try:
+        full_json = json.dumps(data, default=str)
+    except Exception:
+        return data, False
+    if len(full_json) <= budget_chars:
+        return data, False
+
+    compacted: Dict[str, Any] = {}
+    any_truncated = False
+    for key, value in data.items():
+        if isinstance(value, list) and len(value) > max_items:
+            compacted[key] = value[:max_items]
+            compacted[f"{key}_returned_count"] = max_items
+            compacted[f"{key}_total_count"] = len(value)
+            compacted[f"{key}_truncated"] = True
+            any_truncated = True
+        else:
+            compacted[key] = value
+    return compacted, any_truncated
+
+
 def _summarize(envelope: Dict[str, Any]) -> str:
     status = envelope.get("status")
-    if status == "ok":
-        return f"status=ok data={envelope.get('data')} period={envelope.get('period')}"
-    return f"status={status} period={envelope.get('period')} reason={envelope.get('reason')}"
+    if status != "ok":
+        return f"status={status} period={envelope.get('period')} reason={envelope.get('reason')}"
+
+    prefix = (
+        f"status=ok source={envelope.get('source')} period={envelope.get('period')} "
+        f"confidence_status={envelope.get('confidence_status')}"
+    )
+    compacted, truncated = _compact_for_context(envelope.get("data"))
+    if truncated:
+        return (
+            f"{prefix} data={compacted} "
+            "note='One or more list fields were truncated for context size; "
+            "see the *_total_count/_returned_count/_truncated markers next to "
+            "each. Call again with a narrower filter or a smaller limit "
+            "parameter to see different items -- the full result is still "
+            "available from the Bridge, only what is shown to you here was "
+            "shortened.'"
+        )
+    return f"{prefix} data={envelope.get('data')}"
 
 
 def _call_bridge(capability: str, params: Dict[str, Any]) -> Dict[str, Any]:
