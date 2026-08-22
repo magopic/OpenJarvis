@@ -1,15 +1,19 @@
 # MAIA Second Brain V1 — Storage/Domain Foundation + Governed Tools
 
-Status: FASE 4N.4 — storage foundation (4N.1), 6 governed model-callable
+Status: FASE 4O.3 — storage foundation (4N.1), 7 governed model-callable
 tools and the two-step propose/confirm capture workflow (4N.2), stable
 runtime-resolved identity binding (4N.2A), a certified full operational
-experience cycle (4N.3), and deterministic Retrieval Intelligence V1
-(4N.4: progressive broadening + a 7th tool, `second_brain_find_related_experiences`),
-implemented and tested (51/51). No Obsidian sync. No RAG/embeddings —
-broadening is structured-filter progression, not a vector index. No
-graph reasoning beyond one bounded bundle walk. No proactive/autonomous
-memory writes — every write still requires an explicit, separate human
-confirmation.
+experience cycle (4N.3), deterministic Retrieval Intelligence V1
+(4N.4: progressive broadening + `second_brain_find_related_experiences`),
+a one-way Second Brain → Markdown/Obsidian projection (4O.2), and a
+read-only, bounded, principal-aware Knowledge Graph projection/CLI
+(4O.3) — Second Brain core tested 69/69, projections tested 43/43
+(18 Obsidian + 25 Graph). No RAG/embeddings — broadening is
+structured-filter progression, not a vector index. No graph database —
+the Knowledge Graph projection derives from SQLite via
+`SecondBrainService` at query time, nothing is pre-indexed. No 3D UI.
+No proactive/autonomous memory writes — every write still requires an
+explicit, separate human confirmation.
 
 ## PURPOSE
 
@@ -917,6 +921,237 @@ at an unrelated real vault is never silently overwritten).
   single vault mixing content from multiple principals was
   deliberately not designed, to keep the security boundary simple and
   obviously correct rather than cleverly correct.
+
+## KNOWLEDGE GRAPH PROJECTION V1 (FASE 4O.3)
+
+A second, independent derived view of the same authoritative Second
+Brain: `second_brain/projections/graph.py`. Read-only, principal-aware,
+bounded — designed as the future contract for a 3D Knowledge Graph UI
+without building or depending on one yet.
+
+```
+SECOND BRAIN (SQLite, authoritative, unchanged by any query)
+        ├──→  ObsidianProjection      (human/document view, FASE 4O.2)
+        └──→  graph.get_*()           (machine/visual view, FASE 4O.3)
+                                              ↓
+                                    FUTURE 3D GRAPH UI (not built)
+```
+
+**THE GRAPH IS A DERIVED, READ-ONLY VIEW. THE SECOND BRAIN REMAINS
+AUTHORITATIVE.** No query function in this module writes to the
+Second Brain; every one performs at most `list_entries`/`get_entry`/
+`get_relationships`/`get_experience_bundle` calls through
+`SecondBrainService`, live-verified read-only (entry count and audit
+chain identical before/after, both in isolated tests and against the
+real Second Brain — see LIVE READ-ONLY TEST in the FASE 4O.3 final
+report).
+
+The dormant `tools/storage/knowledge_graph.py::KnowledgeGraphMemory`
+(re-audited, still zero instantiations anywhere) was evaluated and not
+reused: it is a free-form entity/relation store with its own SQLite
+backend and no visibility model — reusing it would reopen exactly the
+"invented graph edges" risk this projection exists to avoid. No graph
+database was introduced; SQLite via `SecondBrainService` was
+sufficient at V1 query volumes (see PERFORMANCE below).
+
+## GRAPH CONTRACT
+
+```python
+GraphNode(id, kind, label, entry_type=None, trust_status=None,
+          visibility=None, domains=(), entities=(), lifecycle=None,
+          created_at=None, derived=False)
+
+GraphEdge(id, source, target, kind, status=None, derived=False, basis="")
+
+GraphResponse(nodes, edges, root=None, truncated=False, bounds={})
+```
+
+No full entry body (`summary`, `evidence_references`, `provenance`,
+etc.) is ever included — a graph node carries only what a visual graph
+needs to render and filter (STEP 2's explicit "do not include
+unnecessary full entry bodies"). Fetch the full entry separately
+(`second_brain_get`, or `SecondBrainService.get_entry`) once a node is
+selected in the future UI.
+
+## NODE TYPES
+
+- **`ENTRY`** (`derived=False`) — a real `SecondBrainEntry`. `id` is
+  the entry's own id (globally unique, shared with the Obsidian
+  projection's `second_brain_id` frontmatter field — STEP 16
+  identity). `lifecycle` is `ACTIVE`/`SUPERSEDED`/`ARCHIVED`, computed
+  with the exact same archived-takes-precedence rule as
+  `obsidian.py::note_folder`.
+- **`ENTITY`** / **`DOMAIN`** (`derived=True`) — one node per unique
+  value appearing in some visible entry's `entities[]`/`domains[]`.
+  Not stored rows; assembled at query time from real entry fields.
+
+No `PERSON`/`ASSET`/`PROJECT` node kind exists — those are not
+`EntryType`s, and `entities[]`/`domains[]` values are free text, not a
+typed vocabulary; inventing typed semantics for them here would be the
+same mistake FASE 4O.1 ruled out for the Obsidian vault structure.
+
+## EDGE TYPES / EDGE GOVERNANCE
+
+- **`RELATIONSHIP`** (`derived=False`) — a real, stored `Relationship`
+  row. `status` is `CONFIRMED` or `PROPOSED`, rendered with different
+  status values so the UI can style them distinctly (never the same
+  marker for both). `basis` is the real `relation_type.value` — never
+  an LLM-generated label.
+- **`SUPERSESSION`** (`derived=False`) — the same stored `Relationship`
+  mechanism, singled out by `relation_type == SUPERSEDES` (created
+  automatically and always `CONFIRMED` by `service.supersede_entry()`)
+  so the future UI can render "replaced by" distinctly from an
+  ordinary semantic link, without any separate supersession data
+  structure existing or being invented.
+- **`NAVIGATION`** (`derived=True`) — mechanical `ENTRY → ENTITY` /
+  `ENTRY → DOMAIN` edges from an entry's own fields. `status=None`
+  (not applicable), `basis` is `SHARED_ENTITY`/`SHARED_DOMAIN` — never
+  a claim of causation or similarity from co-occurrence.
+
+`REJECTED` relationships are excluded by default (`GraphFilters`'
+default `relationship_statuses` is `(CONFIRMED, PROPOSED)`); no code
+path infers `CAUSES`/`SIMILAR_TO`/`AFFECTS`/any semantic type from
+mere co-occurrence — every semantic edge is a real stored
+`Relationship`, full stop.
+
+## SECURITY
+
+Identical mechanism to the Obsidian projection's, reused rather than
+reinvented: every read goes through `SecondBrainService`'s existing
+fail-closed visibility clause, so a PRIVATE entry owned by a different
+principal is never fetched — never present to become a node, never
+present to become an edge endpoint, and (since entity/domain nodes are
+only ever assembled from entries actually fetched) never present to
+leak its existence through a derived node either. An edge whose other
+endpoint fails to resolve for the current principal
+(`_resolve_entry`, catching `SecondBrainAuthorizationError` — the
+identical pattern `ObsidianProjection._resolve_entry` uses) is
+silently dropped, never rendered as a placeholder.
+
+Isolated-test-covered (STEP 14 G/H/I/J: owner sees own PRIVATE entry;
+a different principal sees zero nodes; an edge with one PRIVATE,
+unauthorized endpoint disappears entirely; a domain/entity that exists
+*only* because of PRIVATE content produces no derived node and no
+string trace in the serialized JSON for an unauthorized principal) and
+live-verified against the real Second Brain (a synthetic
+`live-smoke-test:nonexistent-principal` actor got zero nodes from
+`get_overview`).
+
+## BOUNDED QUERIES
+
+Every query takes a `GraphBounds(max_nodes, max_edges, max_depth)`,
+clamped server-side to hard caps (1000 / 2000 / 5) regardless of what a
+caller requests — there is no way to ask for an unbounded graph.
+Hitting any cap sets `truncated=True` on the response rather than
+silently dropping data. No "dump the whole brain" entry point exists.
+
+## OVERVIEW
+
+`get_overview()` — the aggregate/navigation view for a future landing
+visualization: the most recently created authorized, active
+(non-archived, non-superseded by default) entries up to `entry_limit`,
+their entity/domain navigation nodes, and the stored relationships
+connecting entries already included. "Recent" is a strict sort by
+`created_at`; no importance score is computed or invented anywhere in
+this module.
+
+## NEIGHBORHOOD EXPANSION
+
+`get_neighborhood(root_id, depth=...)` — deterministic bounded BFS:
+root → stored relationships → linked entries → their entities/domains,
+one hop at a time up to `depth`. Frontier ids and each node's outgoing
+relationships are sorted before expansion, so two consecutive calls
+against an unchanged brain return byte-identical JSON (STEP 14-U,
+live-verified too). Designed for "click node → expand neighborhood":
+each call is a self-contained bounded chunk with stable node/edge ids,
+so a frontend can merge repeated calls into one growing graph without
+needing the server to track UI state.
+
+## EXPERIENCE GRAPH
+
+`get_experience_graph(anchor_entry_id)` — built directly on the
+already-certified, already-bounded, already privacy-safe
+`SecondBrainService.get_experience_bundle()` (FASE 4N.3/4N.4): the
+node set is exactly the bundle's stages (PROBLEM → HYPOTHESIS →
+DECISION → ACTION → OUTCOME → LESSON where linked), with real
+`GraphEdge`s (actual `relation_type`/`status`, not the bundle's
+human-readable `relationship_basis` string) added for the CONFIRMED
+relationships connecting them. This function invents nothing about
+*which* entries belong to the chain — it only re-renders the bundle's
+own membership as a graph.
+
+## FILTERS
+
+`GraphFilters(domains, entities, entry_types, trust_statuses,
+relationship_statuses, since, until, include_archived,
+include_superseded)`. Defaults favor active, non-archived,
+non-superseded entries and `CONFIRMED`+`PROPOSED` relationships
+(`REJECTED` excluded unless explicitly requested). Nothing here is
+business-domain-specific — every filter field is a real, frozen
+Second Brain field name, not an invented business concept.
+
+## JSON CONTRACT
+
+`GraphNode.to_dict()` / `GraphEdge.to_dict()` / `GraphResponse.to_dict()`
+reduce every object to plain `str`/`float`/`bool`/`list`/`dict`/`None`
+— enums are already `.value` strings, tuples become lists, no
+dataclass or Python-specific object leaks through. Node and edge lists
+are pre-sorted by `id` before serialization, so
+`json.dumps(response.to_dict(), sort_keys=True)` is fully
+deterministic — the exact property the neighborhood BFS's byte-equal
+repeat-query test (STEP 14-U) and a live repeat query against the real
+Second Brain both confirmed. This JSON shape is the boundary FASE 4O.4
+(a future graph UI) would consume.
+
+## PERFORMANCE (STEP 15)
+
+Measured against synthetic graphs seeded in an isolated temp DB (not
+the real Second Brain):
+
+| entries | overview query | overview nodes/edges | overview JSON | neighborhood (depth 3) query | neighborhood nodes/edges |
+|---|---|---|---|---|---|
+| 100 | 0.047s | 135 / 397 | 131 KB | 0.004s | 15 / 16 |
+| 1000 | 0.316s | 1000 / 2000 (truncated) | 764 KB | 0.007s | 15 / 16 |
+
+`get_neighborhood()` stays fast and small regardless of total brain
+size — it is bounded by relationship fan-out and `depth`, not entry
+count, matching the V1 target of "bounded interactive graph queries,
+not whole-brain rendering." `get_overview()` scales with `entry_limit`
+(default 50, deliberately small) — the 1000-entry run above
+deliberately forced `entry_limit=1000` to find the truncation edge,
+which behaved correctly (`truncated=True` at the 1000-node hard cap).
+The likely future bottleneck at real scale is entity/domain node
+fan-out inflating `get_overview()`'s JSON payload if a caller raises
+`entry_limit` far past its default — not addressed here since no
+current caller does that; the hard node/edge caps already stop it from
+becoming unbounded.
+
+## OBSIDIAN CONSISTENCY (STEP 16)
+
+The two projections share no rendering code but are verified to share
+the same underlying truth (`test_step16_obsidian_graph_identity_agreement`):
+same entry id, same `entry_type`, same lifecycle-equivalent state
+(`GraphNode.lifecycle` vs. `obsidian.py::note_folder`'s
+archived-precedence rule), same relationship type/status on a shared
+edge, and the same authorization outcome (a principal excluded from
+one projection is excluded from the other for the identical reason —
+`SecondBrainService`'s single fail-closed visibility clause).
+
+## KNOWN LIMITATIONS (added by FASE 4O.3)
+
+- `get_overview()`'s domain/entity-type/trust-status filters narrow
+  results client-side after an already-bounded fetch, not via an
+  indexed combined query — acceptable at V1 volumes (see PERFORMANCE)
+  but not a general filtered table scan; only `domains`/`entities`
+  filters use the store's own indexed lookup.
+- No HTTP endpoint exists — V1 exposure is a Python service contract
+  (`second_brain/projections/graph.py`) plus CLI JSON
+  (`jarvis second-brain graph ...`), deliberately, to avoid widening
+  scope into introducing server dependencies this phase did not need.
+- `get_neighborhood()`'s relationship traversal has no per-call cache
+  across hops — each hop re-queries `get_relationships()` per node,
+  fine at the current bounded depth/node caps, a candidate for
+  optimization only if those caps grow substantially.
 
 ## KNOWN LIMITATIONS (V1)
 
