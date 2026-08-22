@@ -263,6 +263,20 @@ _MEMORY_TOOLS = frozenset(
     {"retrieval", "memory_store", "memory_search", "memory_index", "memory_retrieve"}
 )
 _CHANNEL_TOOLS = frozenset({"channel_send", "channel_list", "channel_status"})
+# FASE 4N.2A: the runtime, not the model, establishes the Second Brain
+# authorization principal -- see second_brain/identity.py. Injected via
+# constructor exactly like _MEMORY_TOOLS' backend above, so there is no
+# tool-call argument the model could use to supply or spoof an identity.
+_SECOND_BRAIN_TOOLS = frozenset(
+    {
+        "second_brain_search",
+        "second_brain_get",
+        "second_brain_propose_entry",
+        "second_brain_confirm_entry",
+        "second_brain_link",
+        "second_brain_archive",
+    }
+)
 
 
 def _build_tools(
@@ -321,6 +335,10 @@ def _build_tools(
             tools.append(tool_cls(engine=engine, model=model_name))
         elif name == "file_read":
             tools.append(tool_cls())
+        elif name in _SECOND_BRAIN_TOOLS:
+            from openjarvis.second_brain.identity import resolve_runtime_principal
+
+            tools.append(tool_cls(principal=resolve_runtime_principal()))
         else:
             tools.append(tool_cls())
     return tools

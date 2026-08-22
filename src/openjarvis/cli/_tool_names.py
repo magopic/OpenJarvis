@@ -4,6 +4,21 @@ from __future__ import annotations
 
 from typing import Any
 
+# FASE 4N.2: Second Brain tools are always safe to auto-enable -- unlike
+# OPS Bridge tools (which need a live governance check against the
+# Registry's trust_status), every Second Brain rule is enforced inside
+# SecondBrainService itself, so there is nothing external to verify here.
+# Listed explicitly (not discovered from the ToolRegistry at large) so
+# auto-enable can never accidentally pull in some future unrelated tool.
+_SECOND_BRAIN_TOOL_IDS = (
+    "second_brain_search",
+    "second_brain_get",
+    "second_brain_propose_entry",
+    "second_brain_confirm_entry",
+    "second_brain_link",
+    "second_brain_archive",
+)
+
 
 def _normalize_tool_names(value: Any) -> list[str]:
     """Normalize configured tool names from string or list-like values."""
@@ -56,5 +71,9 @@ def resolve_tool_names(
                 names.append(auto_id)
     except Exception:
         pass
+
+    for sb_id in _SECOND_BRAIN_TOOL_IDS:
+        if sb_id not in names:
+            names.append(sb_id)
 
     return names

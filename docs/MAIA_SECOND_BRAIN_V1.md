@@ -1,8 +1,11 @@
-# MAIA Second Brain V1 — Storage/Domain Foundation
+# MAIA Second Brain V1 — Storage/Domain Foundation + Governed Tools
 
-Status: FASE 4N.1 — storage foundation implemented and tested. No
-model-callable tools registered yet. No conversational capture. No
-Obsidian sync. No RAG/embeddings.
+Status: FASE 4N.2A — storage foundation (4N.1) plus 6 governed
+model-callable tools, the two-step propose/confirm capture workflow
+(4N.2), and stable runtime-resolved identity binding (4N.2A),
+implemented and tested (34/34). No Obsidian sync. No RAG/embeddings. No
+graph reasoning. No proactive/autonomous memory writes — every write
+still requires an explicit, separate human confirmation.
 
 ## PURPOSE
 
@@ -91,9 +94,9 @@ Type-specific rules enforced in `service.create_entry()`:
 
 Dedicated `~/.openjarvis/second_brain.db` (`store.py`,
 `DEFAULT_SECOND_BRAIN_DB_PATH`), created via the same `secure_create`
-permission helper every other OpenJarvis SQLite store uses. Three
-tables: `entries`, `relationships`, `audit_log`, plus `entries_fts`
-(FTS5).
+permission helper every other OpenJarvis SQLite store uses. Four
+tables: `entries`, `relationships`, `proposals` (FASE 4N.2, additive —
+see CAPTURE WORKFLOW), `audit_log`, plus `entries_fts` (FTS5).
 
 `entries_fts` mirrors the auto-syncing, trigger-maintained,
 content-linked pattern already used by `connectors/store.py`'s
@@ -134,6 +137,12 @@ confirm; the act of calling it *is* the confirmation.
 
 `get_relationships()` returns **direct neighbors only** — no multi-hop
 traversal, no graph reasoning, in V1.
+
+**FASE 4N.2**: `second_brain_link` is a direct pass-through to
+`create_relationship()`, so the model-facing tool inherits the exact
+same guarantee described above — no parameter anywhere in the tool or
+the service lets a caller request anything other than `PROPOSED` at
+creation time.
 
 ## EVIDENCE REFERENCES
 
@@ -193,26 +202,146 @@ changes whether the new model can call the future tool contract (see
 INTEGRATION BOUNDARY) — the same lesson already learned qualifying
 Qwen vs. Claude in FASE 4M.5D/E.
 
-## INTEGRATION BOUNDARY (future phase, not implemented here)
+## TOOL CONTRACTS
 
-No tool is registered against `SecondBrainService` in this phase. The
-documented future contract:
+Six tools, registered in `tools/second_brain_tools.py`, auto-discovered
+by `jarvis ask`/`jarvis chat` exactly like OPS Bridge tools (unioned
+into `resolve_tool_names()` unconditionally — Second Brain tools need
+no live governance check the way OPS Bridge capabilities do, since
+every rule is already enforced inside `SecondBrainService`):
 
-- `second_brain.search` — read, FTS/filters only.
-- `second_brain.get` — read single entry by id.
-- `second_brain.propose_entry` — write, always creates with whatever
-  `trust_status` the caller declares (service-layer validation still
-  applies) — this is the model-facing surface for "MAIA wants to
-  remember something," not a bypass of governance.
-- `second_brain.confirm_entry` — the human-in-the-loop counterpart;
-  without a UI/CLI path to call this, `propose_entry` output should
-  never be treated as confirmed.
-- `second_brain.link` — wraps `create_relationship()` (always
-  `PROPOSED`, per RELATIONSHIPS above).
+| Tool id | Contract | Wraps |
+|---|---|---|
+| `second_brain_search` | `second_brain.search` | `search_entries()` / `list_entries()` |
+| `second_brain_get` | `second_brain.get` | `get_entry()` |
+| `second_brain_propose_entry` | `second_brain.propose_entry` | `propose_entry()` |
+| `second_brain_confirm_entry` | `second_brain.confirm_entry` | `confirm_entry()` |
+| `second_brain_link` | `second_brain.link` | `create_relationship()` |
+| `second_brain_archive` | `second_brain.archive` | `archive_entry()` |
 
-Registering these tools, wiring conversational capture ("Vuoi che
-salvi questa conclusione?"), and any user-confirmation UX belong to
-the next phase, after this storage foundation is certified.
+There is no seventh "generic write" tool and no tool that accepts raw
+SQL or an arbitrary trust-status mutation. Every tool is a thin
+pass-through to `SecondBrainService` — none of them contain governance
+logic of their own, so there is exactly one place (the service) where
+the rules could ever drift from what's enforced.
+
+## CAPTURE WORKFLOW
+
+Two-step, matching the FASE 4N.2 example verbatim:
+
+1. **Propose.** The model calls `second_brain_propose_entry` with
+   everything it has (type, title, summary, trust_status, ...). This
+   validates against the *exact same* rules as a direct
+   `create_entry()` (shared via `_validate_entry_kwargs()`) but writes
+   only to the `proposals` table — nothing is searchable yet. The tool
+   returns a `proposal_id` plus a rendered prompt ("Vuoi che salvi
+   questa conclusione nel Second Brain?") the model must relay to the
+   user, verbatim or in its own words.
+2. **Confirm.** Only a later, separate call to
+   `second_brain_confirm_entry(proposal_id, actor=...)` turns that
+   proposal into a real `SecondBrainEntry` (`ENTRY_CREATED` audited).
+   A proposal can be confirmed exactly once — a second confirm on the
+   same id is rejected (`status != PENDING`).
+
+**Live-verified** (FASE 4N.2 STEP 10, Claude Sonnet 4.6 + Orchestrator,
+real `jarvis ask` calls, no scripting): given a message that already
+contains explicit confirmation ("Ricordati che... Sì, salvala nel
+Second Brain."), the model correctly calls `second_brain_propose_entry`
+then `second_brain_confirm_entry` in sequence, using the real
+`proposal_id` the first call returned — and a follow-up search in the
+same conversation finds the entry. Given an ambiguous message with no
+explicit save instruction, the model asked for confirmation in prose
+*without* calling any Second Brain tool at all — stricter than the
+minimum bar (STEP 4 only requires "no silent save"), never a violation
+of it, since nothing is created either way until an explicit
+`confirm_entry` call exists.
+
+## CONFIRMATION MODEL
+
+- No tool exists that persists an entry without first going through
+  `propose_entry`. This isn't a convention the model is asked to
+  follow — there is no `create_entry`-equivalent tool exposed at all,
+  so a direct write is not just discouraged, it's absent from the
+  model's action space.
+- Silence is never consent: nothing is created by the passage of time,
+  by the user changing topics, or by a subsequent unrelated tool call.
+  Only an explicit `confirm_entry` call persists anything.
+- `confirm_entry` requires its own `actor` — the workflow does not
+  assume the confirmer is the same identity as the proposer (though in
+  practice, for a single-operator install, it usually is).
+
+## AUTHORIZATION
+
+Deliberately **not** a reuse of OPS ONE's Action Book authorization
+(which is a server-verified "authenticated Action Book owner" check —
+see `ops.actions.list`'s `forbidden` response to an anonymous caller).
+Second Brain has no equivalent server-side identity system to check
+against, so pretending otherwise would be dishonest. What V1 actually
+does instead:
+
+- Every entry carries `visibility` (`PRIVATE`/`TEAM`/`COMPANY`) and
+  `created_by`.
+- `PRIVATE` is visible only when the caller's declared `actor` string
+  exactly equals the entry's `created_by`. `TEAM`/`COMPANY` are visible
+  to any actor (V1 has no team/company membership model — see KNOWN
+  LIMITATIONS).
+- **Fails closed by construction, not by convention**: the SQL clause
+  is `visibility != 'PRIVATE' OR created_by = ?` with `actor` bound as
+  a parameter. SQLite NULL comparisons are always false, so a missing
+  actor can never match any `created_by` and a `PRIVATE` row is
+  excluded automatically — there is no separate "did we remember to
+  check" step that could be skipped (`store.py::_visibility_clause`).
+  `get_entry()`/`archive_entry()`/`supersede_entry()` additionally
+  *raise* `SecondBrainAuthorizationError` rather than silently
+  returning nothing, so a denial is never confused with "doesn't
+  exist."
+- Live-verified (FASE 4N.2 STEP 9/10, re-verified 4N.2A): the entry's
+  owner can `get` it; a different actor, or a missing actor, is
+  denied; it never appears in another actor's search results.
+- **FASE 4N.2A: identity is runtime-resolved, never model-supplied.**
+  None of the 6 tools accept `actor`/`created_by`/`principal` as a
+  tool-call argument any more (verified structurally by
+  `test_second_brain_tools_schema_has_no_identity_params`, which
+  inspects the actual JSON schema the model sees). Each tool takes an
+  optional `principal` constructor argument instead; `_build_tools()`
+  (`cli/ask.py`) injects `identity.resolve_runtime_principal()` there
+  exactly the way `_MEMORY_TOOLS` already receive a constructor-injected
+  `backend`. STEP 1's audit found the only existing canonical identity
+  concept in OpenJarvis — `sessions.session.SessionIdentity` — is wired
+  exclusively into the `jarvis serve`/channel runtime and never reaches
+  `jarvis ask`/`jarvis chat` (confirmed: no `[user]` config section, no
+  session store touched by either CLI command). Since nothing existing
+  reaches this path, `resolve_runtime_principal()` fills a real gap
+  rather than inventing a competing identity system: for the current
+  single-user MAIA development environment it derives a deterministic
+  local principal from the OS login account (`getpass.getuser()`,
+  prefixed `local-os-user:` so it's self-describing as a dev-environment
+  stand-in, not a real authenticated id), with an
+  `OPENJARVIS_PRINCIPAL_OVERRIDE` env-var escape hatch for tests/CI —
+  process-controlled, never visible to or settable by the model.
+  Live-verified end-to-end (`jarvis ask`, real Claude Sonnet 4.6, three
+  separate process invocations): the same OS account across two
+  separate `jarvis ask` invocations retrieves its own PRIVATE entry
+  with zero actor/identity string in the conversation; a different
+  runtime principal (via the override) gets an honest "not found," no
+  fabrication. A model attempting to pass a spoofed identity in the
+  tool-call payload has no effect at all — the field doesn't exist in
+  the schema and the code never reads unknown kwargs for authorization.
+- **Still explicitly a development-environment placeholder, not real
+  authentication** — see KNOWN LIMITATIONS for the upgrade path.
+
+## CORRECTIONS
+
+STEP 6 ("Correggi: la causa verificata era il cambio formato.") reuses
+`supersede_entry()` (FASE 4N.1) rather than introducing a new
+mechanism: `confirm_entry()` takes an optional `supersedes_entry_id`.
+When set, the newly confirmed entry is created via `supersede_entry`
+instead of a bare `create_entry` — the old entry's content is never
+touched, only its `superseded_by` pointer is set, and a `CONFIRMED`
+`SUPERSEDES` relationship links new → old. There is deliberately no
+separate "correction" tool; correcting is just confirming a new
+proposal while naming what it replaces.
+
 
 ## FUTURE OBSIDIAN BOUNDARY (not implemented here)
 
@@ -238,10 +367,43 @@ changes through.
 
 ## KNOWN LIMITATIONS (V1)
 
-- No model-callable tools yet — the storage foundation is usable only
-  from Python, by design (see STEP 10 of the phase spec).
-- No conversational capture — nothing captures a MAIA answer into an
-  entry automatically or semi-automatically yet.
+- **RESOLVED in FASE 4N.2A** (was the top limitation as of 4N.2): the
+  cross-invocation identity gap is fixed at the runtime/tool boundary
+  — see AUTHORIZATION above. What remains is a narrower, explicitly
+  scoped limitation: `resolve_runtime_principal()`'s current
+  implementation is a **single-user development-environment
+  placeholder**, not real authentication. It identifies "this OS
+  account on this machine," which is exactly right for the current
+  MAIA development environment but does not extend to: multiple real
+  people sharing one OS account (they'd collide onto the same
+  principal), the same person across multiple machines (each machine
+  gets its own principal, so a PRIVATE entry made on one machine isn't
+  visible from another), or any server/multi-tenant deployment. The
+  upgrade path is deliberately narrow: `resolve_runtime_principal()` is
+  the only function that needs to change (to a real authenticated
+  identity — SSO token, `SessionIdentity.user_id` threaded through a
+  future CLI login, etc.) — every caller already treats its return
+  value as an opaque string, so nothing above this function needs to
+  change when that day comes.
+- Proposals are not automatically expired or cleaned up — a `PENDING`
+  proposal nobody ever confirms sits in `proposals` indefinitely. No
+  tool exists to reject/withdraw one either (STEP 1's tool list has no
+  "reject_entry"); it simply stays `PENDING` and inert.
+- No conversational capture is automatic or semi-automatic in the
+  "MAIA notices something worth remembering on its own" sense — the
+  model must actively choose to call `propose_entry`; nothing scans
+  conversation content proactively (explicitly out of scope: "no
+  proactive autonomous memory writes").
+- **FIXED in FASE 4N.2A, found live**: `search_entries_fts()` passed
+  raw user/model text straight into FTS5's `MATCH` string. FTS5's query
+  grammar overloads plain characters as operators — a bareword like
+  `Zeta-9` parsed as a column filter on `9` and crashed with
+  `"no such column: 9"` (hit live by Claude Sonnet 4.6 on a real
+  question about a test line name). Fixed by wrapping every whitespace
+  token in double quotes before it reaches `MATCH`
+  (`store.py::_fts5_safe_query`), so punctuation is always treated as
+  literal text, never syntax — covered by
+  `test_o_fts_search_handles_fts5_special_characters`.
 - Similarity retrieval, if added later, is structural (domain/entity
   overlap) per the original FASE 4N design — not semantic/embeddings.
 - `get_relationships()` has no multi-hop traversal; a caller wanting a
@@ -252,9 +414,8 @@ changes through.
   first-class columns, which the "AI-proposed relationships are never
   auto-certified" governance rule requires as queryable, not
   JSON-buried, fields.
-- The 4 test fixtures flagged (not deleted) at the end of FASE 4N
-  Step 1 (`test-codeword=ZEBRA-7`, `operator:researcher:state`,
-  2× `NEBULA KB TEST AGENT`, `SCHEDULER PATCH TEST AGENT`) were
-  re-verified and removed/archived in this phase's STEP 1 — see the
-  FASE 4N.1 final report's TEST FIXTURE CLEANUP section for exact
-  before/after identifiers.
+- All FASE 4N Step 1 test fixtures (`test-codeword=ZEBRA-7`,
+  `operator:researcher:state`, 2× `NEBULA KB TEST AGENT`,
+  `SCHEDULER PATCH TEST AGENT`) were re-verified and removed/archived
+  in FASE 4N.1 STEP 1 — see that phase's final report for exact
+  before/after identifiers. None remain flagged.

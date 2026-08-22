@@ -49,7 +49,7 @@ def test_a_create_event(service: SecondBrainService):
     assert entry.id
     assert entry.type is EntryType.EVENT
     assert entry.trust_status is EntryTrustStatus.OBSERVED
-    assert service.get_entry(entry.id) is not None
+    assert service.get_entry(entry.id, actor="user:luigi") is not None
 
 
 def test_b_create_problem(service: SecondBrainService):
@@ -126,7 +126,7 @@ def test_f_hypothesis_does_not_auto_promote(service: SecondBrainService):
     # No API exists to mutate trust_status on an existing entry --
     # re-reading it must show the exact same status, unchanged by time
     # or by any other call the service exposes.
-    reread = service.get_entry(entry.id)
+    reread = service.get_entry(entry.id, actor="user:luigi")
     assert reread is not None
     assert reread.trust_status is EntryTrustStatus.HYPOTHESIS
     assert not hasattr(service, "promote_entry")
@@ -305,7 +305,7 @@ def test_m_supersede_entry_preserves_old_version(service: SecondBrainService):
     assert updated_old.title == "Osservazione iniziale"  # original content untouched
     assert updated_old.summary == "Testo originale, poi corretto."
     assert updated_old.superseded_by is not None
-    new_entry = service.get_entry(updated_old.superseded_by)
+    new_entry = service.get_entry(updated_old.superseded_by, actor="user:luigi")
     assert new_entry is not None
     assert new_entry.title == "Osservazione corretta"
     assert rel.relation_type is RelationshipType.SUPERSEDES
@@ -324,9 +324,9 @@ def test_n_archive_entry(service: SecondBrainService):
     archived = service.archive_entry(entry.id, actor="user:luigi")
     assert archived.archived_at is not None
     # archived entries are excluded from default listing
-    listed = service.list_entries()
+    listed = service.list_entries(actor="user:luigi")
     assert all(e.id != entry.id for e in listed)
-    listed_incl = service.list_entries(include_archived=True)
+    listed_incl = service.list_entries(actor="user:luigi", include_archived=True)
     assert any(e.id == entry.id for e in listed_incl)
 
 
@@ -344,9 +344,28 @@ def test_o_fts_search(service: SecondBrainService):
         created_by="user:luigi", provenance="x", source="conversation",
         trust_status=EntryTrustStatus.OBSERVED, domains=["logistics"],
     )
-    results = service.search_entries("cambio formato")
+    results = service.search_entries("cambio formato", actor="user:luigi")
     assert len(results) == 1
     assert results[0].title == "Fermo linea M"
+
+
+def test_o_fts_search_handles_fts5_special_characters(service: SecondBrainService):
+    """FASE 4N.2A regression: a bareword like 'Zeta-9' used to crash FTS5
+    with 'no such column: 9' (found live, Claude Sonnet 4.6 hit this on
+    a real query) -- unescaped user text let FTS5's query grammar
+    misparse plain content as syntax."""
+    service.create_entry(
+        type=EntryType.PROBLEM, title="Problema linea Zeta-9",
+        summary="Calibrazione sensori sulla linea Zeta-9",
+        created_by="user:luigi", provenance="x", source="conversation",
+        trust_status=EntryTrustStatus.OBSERVED, domains=["production"],
+    )
+    for query in ("Zeta-9", "calibrazione sensori Zeta-9", 'title:hack OR 1=1', "NOT AND OR"):
+        results = service.search_entries(query, actor="user:luigi")
+        assert isinstance(results, list)  # must not raise
+    results = service.search_entries("Zeta-9", actor="user:luigi")
+    assert len(results) == 1
+    assert results[0].title == "Problema linea Zeta-9"
 
 
 def test_p_domain_entity_filtering(service: SecondBrainService):
@@ -360,10 +379,10 @@ def test_p_domain_entity_filtering(service: SecondBrainService):
         provenance="x", source="conversation", trust_status=EntryTrustStatus.OBSERVED,
         domains=["logistics"], entities=["fornitore X"],
     )
-    prod = service.list_entries(domain="production")
+    prod = service.list_entries(actor="user:luigi", domain="production")
     assert len(prod) == 1
     assert prod[0].title == "A"
-    by_entity = service.list_entries(entity="fornitore X")
+    by_entity = service.list_entries(actor="user:luigi", entity="fornitore X")
     assert len(by_entity) == 1
     assert by_entity[0].title == "B"
 
@@ -398,7 +417,7 @@ def test_q_evidence_reference_no_kpi_value(service: SecondBrainService):
         trust_status=EntryTrustStatus.VERIFIED,
         evidence_references=[ref],
     )
-    reread = service.get_entry(entry.id)
+    reread = service.get_entry(entry.id, actor="user:luigi")
     assert reread is not None
     assert len(reread.evidence_references) == 1
     stored_ref = reread.evidence_references[0]

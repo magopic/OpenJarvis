@@ -12,4 +12,14 @@ class SecondBrainValidationError(ValueError):
     """
 
 
-__all__ = ["SecondBrainValidationError"]
+class SecondBrainAuthorizationError(SecondBrainValidationError):
+    """Raised when a caller's ``actor`` cannot access a PRIVATE entry.
+
+    A subclass of ``SecondBrainValidationError`` (not a sibling) so
+    existing callers that catch the base class still catch this --
+    but tools should catch it specifically when they want to report
+    "access denied" distinctly from "bad input".
+    """
+
+
+__all__ = ["SecondBrainAuthorizationError", "SecondBrainValidationError"]

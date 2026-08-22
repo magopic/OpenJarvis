@@ -82,12 +82,32 @@ class RelationshipStatus(str, Enum):
     REJECTED = "REJECTED"
 
 
+class ProposalStatus(str, Enum):
+    """Lifecycle of a not-yet-persisted memory proposal (FASE 4N.2).
+
+    A proposal is NOT a SecondBrainEntry and never appears in
+    search/list results -- it is the holding area for the mandatory
+    two-step "MAIA proposes, user confirms" capture workflow. Only
+    ``confirm_entry`` (an explicit, separate call) turns a PENDING
+    proposal into a real entry.
+    """
+
+    PENDING = "PENDING"
+    CONFIRMED = "CONFIRMED"
+
+
 class AuditEventType(str, Enum):
     ENTRY_CREATED = "ENTRY_CREATED"
     ENTRY_ARCHIVED = "ENTRY_ARCHIVED"
     ENTRY_SUPERSEDED = "ENTRY_SUPERSEDED"
     RELATIONSHIP_CREATED = "RELATIONSHIP_CREATED"
     RELATIONSHIP_STATUS_CHANGED = "RELATIONSHIP_STATUS_CHANGED"
+    # FASE 4N.2 -- the propose/confirm capture workflow. ENTRY_CREATED
+    # (above) still fires when confirm_entry() actually persists the
+    # entry; ENTRY_PROPOSED records the earlier, non-persisting step so
+    # the audit trail shows every AI-initiated write attempt, not just
+    # the ones a human went on to confirm.
+    ENTRY_PROPOSED = "ENTRY_PROPOSED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +170,19 @@ class Relationship:
     created_at: float
     updated_at: float
     confidence: Optional[float] = None
+
+
+@dataclass(slots=True)
+class Proposal:
+    """A pending, not-yet-persisted entry proposal (FASE 4N.2)."""
+
+    id: str
+    payload: Dict[str, Any]
+    proposed_by: str
+    status: ProposalStatus
+    created_at: float
+    resolved_at: Optional[float] = None
+    resolved_entry_id: Optional[str] = None
 
 
 @dataclass(slots=True)

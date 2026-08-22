@@ -16,13 +16,18 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Union
 
-from openjarvis.second_brain.errors import SecondBrainValidationError
+from openjarvis.second_brain.errors import (
+    SecondBrainAuthorizationError,
+    SecondBrainValidationError,
+)
 from openjarvis.second_brain.store import SecondBrainStore
 from openjarvis.second_brain.types import (
     AuditEventType,
     EntryTrustStatus,
     EntryType,
     EvidenceReference,
+    Proposal,
+    ProposalStatus,
     Relationship,
     RelationshipStatus,
     RelationshipType,
@@ -58,6 +63,61 @@ def _validate_confidence(confidence: Optional[float]) -> None:
         )
 
 
+def _validate_entry_kwargs(
+    *,
+    type: Union[EntryType, str],
+    title: str,
+    summary: str,
+    created_by: str,
+    provenance: str,
+    source: str,
+    trust_status: Union[EntryTrustStatus, str],
+    visibility: Union[Visibility, str],
+    domains: Optional[List[str]],
+    entities: Optional[List[str]],
+    timestamp: Optional[float],
+    confidence: Optional[float],
+    evidence_references: Optional[List[EvidenceReference]],
+) -> "tuple[EntryType, EntryTrustStatus, Visibility]":
+    """Shared governance check for both ``create_entry`` and
+    ``propose_entry`` -- a proposal must fail the exact same rules a
+    direct create would, just before it ever reaches ``entries``."""
+    entry_type = _coerce_enum(type, EntryType, "type")
+    entry_trust = _coerce_enum(trust_status, EntryTrustStatus, "trust_status")
+    entry_visibility = _coerce_enum(visibility, Visibility, "visibility")
+
+    _require_nonempty_str(created_by, "created_by")
+    _require_nonempty_str(provenance, "provenance")
+    _require_nonempty_str(source, "source")
+    _require_nonempty_str(title, "title")
+    _validate_confidence(confidence)
+
+    # DECISION must carry created_by (already required above),
+    # timestamp, and context provenance (already required above).
+    if entry_type is EntryType.DECISION and timestamp is None:
+        raise SecondBrainValidationError(
+            "DECISION entries require a timestamp (when the decision was made)"
+        )
+
+    # A LESSON (or any entry reaching LEARNED) must declare which
+    # prior experience/outcome it derives from -- provenance alone
+    # is not enough evidence of grounding; it must also point at
+    # something concrete (a domain/entity it concerns, or an
+    # evidence reference). We cannot require the OUTCOME
+    # relationship to already exist here (chicken-and-egg: the
+    # relationship needs this entry's id, which doesn't exist yet)
+    # -- that link is created separately via create_relationship().
+    if entry_type is EntryType.LESSON or entry_trust is EntryTrustStatus.LEARNED:
+        if not (domains or entities or evidence_references):
+            raise SecondBrainValidationError(
+                "LESSON/LEARNED entries must be grounded in something concrete: "
+                "provide at least one of domains, entities, or evidence_references "
+                "describing the prior experience/outcome this lesson derives from"
+            )
+
+    return entry_type, entry_trust, entry_visibility
+
+
 class SecondBrainService:
     """Model-independent Second Brain API. Never expose raw SQL to a caller."""
 
@@ -83,38 +143,26 @@ class SecondBrainService:
         confidence: Optional[float] = None,
         evidence_references: Optional[List[EvidenceReference]] = None,
     ) -> SecondBrainEntry:
-        entry_type = _coerce_enum(type, EntryType, "type")
-        entry_trust = _coerce_enum(trust_status, EntryTrustStatus, "trust_status")
-        entry_visibility = _coerce_enum(visibility, Visibility, "visibility")
-
-        _require_nonempty_str(created_by, "created_by")
-        _require_nonempty_str(provenance, "provenance")
-        _require_nonempty_str(source, "source")
-        _require_nonempty_str(title, "title")
-        _validate_confidence(confidence)
-
-        # DECISION must carry created_by (already required above),
-        # timestamp, and context provenance (already required above).
-        if entry_type is EntryType.DECISION and timestamp is None:
-            raise SecondBrainValidationError(
-                "DECISION entries require a timestamp (when the decision was made)"
-            )
-
-        # A LESSON (or any entry reaching LEARNED) must declare which
-        # prior experience/outcome it derives from -- provenance alone
-        # is not enough evidence of grounding; it must also point at
-        # something concrete (a domain/entity it concerns, or an
-        # evidence reference). We cannot require the OUTCOME
-        # relationship to already exist here (chicken-and-egg: the
-        # relationship needs this entry's id, which doesn't exist yet)
-        # -- that link is created separately via create_relationship().
-        if entry_type is EntryType.LESSON or entry_trust is EntryTrustStatus.LEARNED:
-            if not (domains or entities or evidence_references):
-                raise SecondBrainValidationError(
-                    "LESSON/LEARNED entries must be grounded in something concrete: "
-                    "provide at least one of domains, entities, or evidence_references "
-                    "describing the prior experience/outcome this lesson derives from"
-                )
+        """Persist an entry directly. For AI-initiated conversational
+        capture, use ``propose_entry`` + ``confirm_entry`` instead --
+        this method is for callers (supersede_entry, tests, a human
+        directly using the service) that don't need the two-step gate.
+        """
+        entry_type, entry_trust, entry_visibility = _validate_entry_kwargs(
+            type=type,
+            title=title,
+            summary=summary,
+            created_by=created_by,
+            provenance=provenance,
+            source=source,
+            trust_status=trust_status,
+            visibility=visibility,
+            domains=domains,
+            entities=entities,
+            timestamp=timestamp,
+            confidence=confidence,
+            evidence_references=evidence_references,
+        )
 
         now = time.time()
         entry = SecondBrainEntry(
@@ -148,16 +196,178 @@ class SecondBrainService:
         )
         return entry
 
-    def get_entry(self, entry_id: str) -> Optional[SecondBrainEntry]:
-        return self._store.get_entry(entry_id)
+    def propose_entry(
+        self,
+        *,
+        type: Union[EntryType, str],
+        title: str,
+        summary: str,
+        created_by: str,
+        provenance: str,
+        source: str,
+        trust_status: Union[EntryTrustStatus, str],
+        visibility: Union[Visibility, str] = Visibility.PRIVATE,
+        domains: Optional[List[str]] = None,
+        entities: Optional[List[str]] = None,
+        timestamp: Optional[float] = None,
+        confidence: Optional[float] = None,
+        evidence_references: Optional[List[EvidenceReference]] = None,
+    ) -> Proposal:
+        """Step 1 of the mandatory two-step capture workflow.
 
-    def search_entries(self, query: str, *, limit: int = 50) -> List[SecondBrainEntry]:
-        """Exact/FTS retrieval only -- no semantic similarity in V1."""
-        return self._store.search_entries_fts(query, limit=limit)
+        Validates exactly as ``create_entry`` would, but does **not**
+        write to ``entries`` -- nothing here is searchable, retrievable,
+        or a "memory" yet. Returns a ``Proposal`` the caller (the model,
+        via a tool) must show the user and get explicit confirmation on
+        before ``confirm_entry`` can turn it into a real entry. Silence
+        is never confirmation -- only a separate, later call to
+        ``confirm_entry`` with this proposal's id persists anything.
+        """
+        _validate_entry_kwargs(
+            type=type,
+            title=title,
+            summary=summary,
+            created_by=created_by,
+            provenance=provenance,
+            source=source,
+            trust_status=trust_status,
+            visibility=visibility,
+            domains=domains,
+            entities=entities,
+            timestamp=timestamp,
+            confidence=confidence,
+            evidence_references=evidence_references,
+        )
+
+        payload: Dict[str, Any] = {
+            "type": _coerce_enum(type, EntryType, "type").value,
+            "title": title,
+            "summary": summary,
+            "created_by": created_by,
+            "provenance": provenance,
+            "source": source,
+            "trust_status": _coerce_enum(trust_status, EntryTrustStatus, "trust_status").value,
+            "visibility": _coerce_enum(visibility, Visibility, "visibility").value,
+            "domains": list(domains or []),
+            "entities": list(entities or []),
+            "timestamp": timestamp,
+            "confidence": confidence,
+            "evidence_references": [
+                {
+                    "capability": ref.capability,
+                    "domain": ref.domain,
+                    "metric": ref.metric,
+                    "period": ref.period,
+                    "filters": ref.filters,
+                    "trust_status_at_capture": ref.trust_status_at_capture,
+                    "fetched_at": ref.fetched_at,
+                }
+                for ref in (evidence_references or [])
+            ],
+        }
+
+        now = time.time()
+        proposal = Proposal(
+            id=str(uuid.uuid4()),
+            payload=payload,
+            proposed_by=created_by,
+            status=ProposalStatus.PENDING,
+            created_at=now,
+        )
+        self._store.insert_proposal(proposal)
+        self._store.append_audit_event(
+            AuditEventType.ENTRY_PROPOSED,
+            actor=created_by,
+            target_id=proposal.id,
+            action=f"propose_entry(type={payload['type']})",
+            details={"title": title, "type": payload["type"]},
+            timestamp=now,
+        )
+        return proposal
+
+    def confirm_entry(
+        self,
+        proposal_id: str,
+        *,
+        actor: str,
+        supersedes_entry_id: Optional[str] = None,
+    ) -> SecondBrainEntry:
+        """Step 2 of the capture workflow -- the only call that persists.
+
+        Requires an explicit, separate invocation with the actor who is
+        confirming (typically the user, via whatever surface relayed
+        their "yes"/"salvala"). There is no implicit-confirmation path:
+        this method is never called as a side effect of anything else.
+
+        Pass ``supersedes_entry_id`` when the user's confirmation is a
+        *correction* of an existing entry (STEP 6: "Correggi: ..."):
+        the new entry is created exactly as usual, but via
+        ``supersede_entry`` rather than a bare ``create_entry`` -- the
+        old entry is never overwritten, only linked via a CONFIRMED
+        SUPERSEDES relationship and its ``superseded_by`` pointer.
+        """
+        _require_nonempty_str(actor, "actor")
+        proposal = self._store.get_proposal(proposal_id)
+        if proposal is None:
+            raise SecondBrainValidationError(f"No such proposal: {proposal_id}")
+        if proposal.status is not ProposalStatus.PENDING:
+            raise SecondBrainValidationError(
+                f"Proposal {proposal_id} is already {proposal.status.value}, not PENDING"
+            )
+
+        payload = dict(proposal.payload)
+        evidence_refs = [
+            EvidenceReference(**ref) for ref in payload.pop("evidence_references", [])
+        ]
+        payload["evidence_references"] = evidence_refs
+
+        if supersedes_entry_id is not None:
+            _, relationship = self.supersede_entry(
+                supersedes_entry_id, actor=actor, new_entry_kwargs=payload
+            )
+            entry = self._store.get_entry(relationship.source_entry_id)
+            assert entry is not None
+        else:
+            entry = self.create_entry(**payload)
+
+        now = time.time()
+        self._store.set_proposal_resolved(
+            proposal_id, resolved_entry_id=entry.id, resolved_at=now
+        )
+        return entry
+
+    @staticmethod
+    def _check_visibility(entry: SecondBrainEntry, actor: Optional[str]) -> None:
+        """Fail closed: a missing actor never satisfies a PRIVATE check."""
+        if entry.visibility is Visibility.PRIVATE and entry.created_by != actor:
+            raise SecondBrainAuthorizationError(
+                f"Entry {entry.id} is PRIVATE to its creator; access denied"
+            )
+
+    def get_entry(
+        self, entry_id: str, *, actor: Optional[str] = None
+    ) -> Optional[SecondBrainEntry]:
+        entry = self._store.get_entry(entry_id)
+        if entry is None:
+            return None
+        self._check_visibility(entry, actor)
+        return entry
+
+    def search_entries(
+        self, query: str, *, actor: Optional[str] = None, limit: int = 50
+    ) -> List[SecondBrainEntry]:
+        """Exact/FTS retrieval only -- no semantic similarity in V1.
+
+        PRIVATE entries not owned by ``actor`` are silently excluded
+        (not raised) -- a search result is a filtered list, not a
+        single-resource access decision like ``get_entry``.
+        """
+        return self._store.search_entries_fts(query, actor=actor, limit=limit)
 
     def list_entries(
         self,
         *,
+        actor: Optional[str] = None,
         entry_type: Optional[Union[EntryType, str]] = None,
         trust_status: Optional[Union[EntryTrustStatus, str]] = None,
         domain: Optional[str] = None,
@@ -168,6 +378,7 @@ class SecondBrainService:
         limit: int = 50,
     ) -> List[SecondBrainEntry]:
         return self._store.list_entries(
+            actor=actor,
             entry_type=_coerce_enum(entry_type, EntryType, "entry_type") if entry_type else None,
             trust_status=(
                 _coerce_enum(trust_status, EntryTrustStatus, "trust_status")
@@ -187,6 +398,7 @@ class SecondBrainService:
         entry = self._store.get_entry(entry_id)
         if entry is None:
             raise SecondBrainValidationError(f"No such entry: {entry_id}")
+        self._check_visibility(entry, actor)
         now = time.time()
         self._store.set_entry_archived(entry_id, archived_at=now, updated_at=now)
         self._store.append_audit_event(
@@ -218,6 +430,7 @@ class SecondBrainService:
         old_entry = self._store.get_entry(old_entry_id)
         if old_entry is None:
             raise SecondBrainValidationError(f"No such entry: {old_entry_id}")
+        self._check_visibility(old_entry, actor)
 
         if new_entry is None:
             if not new_entry_kwargs:

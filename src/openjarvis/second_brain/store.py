@@ -1,8 +1,11 @@
 """SQLite storage for MAIA Second Brain V1.
 
 Dedicated database (``second_brain.db``, distinct from ``memory.db``
-and ``knowledge.db``) with three tables: ``entries``, ``relationships``,
-``audit_log``. FTS5 search on entries mirrors the auto-syncing
+and ``knowledge.db``) with four tables: ``entries``, ``relationships``,
+``proposals`` (FASE 4N.2 -- the propose/confirm capture workflow's
+holding area, added additively; the original three tables are
+unchanged), and ``audit_log``. FTS5 search on entries mirrors the
+auto-syncing
 content-linked pattern already used by ``connectors/store.py``'s
 ``KnowledgeStore`` (trigger-maintained, not manually re-indexed like
 ``tools/storage/sqlite.py``'s ``SQLiteMemory``).
@@ -32,6 +35,8 @@ from openjarvis.second_brain.types import (
     EntryTrustStatus,
     EntryType,
     EvidenceReference,
+    Proposal,
+    ProposalStatus,
     Relationship,
     RelationshipStatus,
     RelationshipType,
@@ -76,6 +81,18 @@ CREATE TABLE IF NOT EXISTS relationships (
     status           TEXT NOT NULL DEFAULT 'PROPOSED',
     created_at       REAL NOT NULL,
     updated_at       REAL NOT NULL
+);
+"""
+
+_CREATE_PROPOSALS = """
+CREATE TABLE IF NOT EXISTS proposals (
+    id                  TEXT PRIMARY KEY,
+    payload             TEXT NOT NULL,
+    proposed_by         TEXT NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'PENDING',
+    created_at          REAL NOT NULL,
+    resolved_at         REAL,
+    resolved_entry_id   TEXT REFERENCES entries(id)
 );
 """
 
@@ -133,7 +150,28 @@ CREATE INDEX IF NOT EXISTS idx_rel_type               ON relationships(relation_
 CREATE INDEX IF NOT EXISTS idx_rel_status             ON relationships(status);
 CREATE INDEX IF NOT EXISTS idx_audit_target           ON audit_log(target_id);
 CREATE INDEX IF NOT EXISTS idx_audit_event_type       ON audit_log(event_type);
+CREATE INDEX IF NOT EXISTS idx_proposals_status       ON proposals(status);
+CREATE INDEX IF NOT EXISTS idx_proposals_proposed_by  ON proposals(proposed_by);
 """
+
+
+def _fts5_safe_query(text: str) -> str:
+    """Turn free-text user input into a query FTS5's own MATCH-string
+    grammar can't misparse.
+
+    FTS5's query syntax overloads several plain-text characters as
+    operators -- most surprisingly, a bareword like ``Zeta-9`` is
+    parsed as ``Zeta`` followed by a column filter on ``9`` (raising
+    "no such column: 9"), not as literal text. Colons, asterisks,
+    parens, and the keywords AND/OR/NOT have similar traps. The fix
+    used everywhere FTS5 takes untrusted input: wrap every whitespace
+    token in double quotes (doubling any embedded ``"``), so each one
+    is parsed as a literal phrase rather than as query syntax. Terms
+    are still implicitly ANDed together, preserving normal multi-word
+    search behavior.
+    """
+    tokens = text.split()
+    return " ".join('"' + t.replace('"', '""') + '"' for t in tokens)
 
 
 def _entry_to_row(e: SecondBrainEntry) -> tuple:
@@ -237,6 +275,18 @@ def _row_to_relationship(row: sqlite3.Row) -> Relationship:
     )
 
 
+def _row_to_proposal(row: sqlite3.Row) -> Proposal:
+    return Proposal(
+        id=row["id"],
+        payload=json.loads(row["payload"]),
+        proposed_by=row["proposed_by"],
+        status=ProposalStatus(row["status"]),
+        created_at=row["created_at"],
+        resolved_at=row["resolved_at"],
+        resolved_entry_id=row["resolved_entry_id"],
+    )
+
+
 def _row_to_audit_event(row: sqlite3.Row) -> AuditEvent:
     return AuditEvent(
         id=row["id"],
@@ -271,6 +321,7 @@ class SecondBrainStore:
         self._conn.executescript(
             _CREATE_ENTRIES
             + _CREATE_RELATIONSHIPS
+            + _CREATE_PROPOSALS
             + _CREATE_AUDIT_LOG
             + _CREATE_FTS
             + _CREATE_TRIGGERS
@@ -295,6 +346,9 @@ class SecondBrainStore:
         self._conn.commit()
 
     def get_entry(self, entry_id: str) -> Optional[SecondBrainEntry]:
+        """Raw fetch, no visibility filtering -- see ``service.get_entry``
+        for the actor-aware, authorization-enforcing version callers
+        (and every tool) must use instead."""
         row = self._conn.execute(
             "SELECT * FROM entries WHERE id = ?", (entry_id,)
         ).fetchone()
@@ -318,9 +372,22 @@ class SecondBrainStore:
         )
         self._conn.commit()
 
+    @staticmethod
+    def _visibility_clause(actor: Optional[str]) -> "tuple[str, list]":
+        """A PRIVATE entry is visible only to its own creator.
+
+        Binding ``actor`` as a SQL parameter (never string-interpolated)
+        means a missing actor (``None``) can never equal any
+        ``created_by`` value -- SQLite NULL comparisons are always
+        false -- so this fails closed by construction, not by a
+        separate "did you remember to check" step.
+        """
+        return " AND (visibility != 'PRIVATE' OR created_by = ?)", [actor]
+
     def list_entries(
         self,
         *,
+        actor: Optional[str] = None,
         entry_type: Optional[EntryType] = None,
         trust_status: Optional[EntryTrustStatus] = None,
         domain: Optional[str] = None,
@@ -352,25 +419,73 @@ class SecondBrainStore:
         if until is not None:
             sql += " AND (timestamp IS NULL OR timestamp <= ?)"
             params.append(until)
+        clause, clause_params = self._visibility_clause(actor)
+        sql += clause
+        params.extend(clause_params)
         sql += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
         rows = self._conn.execute(sql, params).fetchall()
         return [_row_to_entry(r) for r in rows]
 
-    def search_entries_fts(self, query: str, *, limit: int = 50) -> List[SecondBrainEntry]:
+    def search_entries_fts(
+        self, query: str, *, actor: Optional[str] = None, limit: int = 50
+    ) -> List[SecondBrainEntry]:
         if not query.strip():
             return []
+        clause, clause_params = self._visibility_clause(actor)
         rows = self._conn.execute(
-            """
+            f"""
             SELECT entries.* FROM entries_fts
             JOIN entries ON entries.rowid = entries_fts.rowid
             WHERE entries_fts MATCH ?
+            {clause}
             ORDER BY rank
             LIMIT ?
             """,
-            (query, limit),
+            [_fts5_safe_query(query), *clause_params, limit],
         ).fetchall()
         return [_row_to_entry(r) for r in rows]
+
+    # -- proposals (FASE 4N.2 propose/confirm capture workflow) -----------
+
+    def insert_proposal(self, proposal: Proposal) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO proposals
+                (id, payload, proposed_by, status, created_at,
+                 resolved_at, resolved_entry_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                proposal.id,
+                json.dumps(proposal.payload),
+                proposal.proposed_by,
+                proposal.status.value,
+                proposal.created_at,
+                proposal.resolved_at,
+                proposal.resolved_entry_id,
+            ),
+        )
+        self._conn.commit()
+
+    def get_proposal(self, proposal_id: str) -> Optional[Proposal]:
+        row = self._conn.execute(
+            "SELECT * FROM proposals WHERE id = ?", (proposal_id,)
+        ).fetchone()
+        return _row_to_proposal(row) if row else None
+
+    def set_proposal_resolved(
+        self, proposal_id: str, *, resolved_entry_id: str, resolved_at: float
+    ) -> None:
+        self._conn.execute(
+            """
+            UPDATE proposals
+            SET status = ?, resolved_at = ?, resolved_entry_id = ?
+            WHERE id = ?
+            """,
+            (ProposalStatus.CONFIRMED.value, resolved_at, resolved_entry_id, proposal_id),
+        )
+        self._conn.commit()
 
     # -- relationships ----------------------------------------------------
 
