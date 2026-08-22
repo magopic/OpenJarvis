@@ -1,19 +1,21 @@
 # MAIA Second Brain V1 — Storage/Domain Foundation + Governed Tools
 
-Status: FASE 4O.3 — storage foundation (4N.1), 7 governed model-callable
+Status: FASE 4O.4 — storage foundation (4N.1), 7 governed model-callable
 tools and the two-step propose/confirm capture workflow (4N.2), stable
 runtime-resolved identity binding (4N.2A), a certified full operational
 experience cycle (4N.3), deterministic Retrieval Intelligence V1
 (4N.4: progressive broadening + `second_brain_find_related_experiences`),
-a one-way Second Brain → Markdown/Obsidian projection (4O.2), and a
-read-only, bounded, principal-aware Knowledge Graph projection/CLI
-(4O.3) — Second Brain core tested 69/69, projections tested 43/43
-(18 Obsidian + 25 Graph). No RAG/embeddings — broadening is
-structured-filter progression, not a vector index. No graph database —
-the Knowledge Graph projection derives from SQLite via
-`SecondBrainService` at query time, nothing is pre-indexed. No 3D UI.
-No proactive/autonomous memory writes — every write still requires an
-explicit, separate human confirmation.
+a one-way Second Brain → Markdown/Obsidian projection (4O.2), a
+read-only, bounded, principal-aware Knowledge Graph projection/CLI/HTTP
+API (4O.3), and a read-only 3D Knowledge Graph UI consuming that API
+(4O.4) — Second Brain core tested 69/69, backend projections tested
+43/43 (18 Obsidian + 25 Graph), frontend graph logic tested 31/31.
+No RAG/embeddings — broadening is structured-filter progression, not a
+vector index. No graph database — the Knowledge Graph projection
+derives from SQLite via `SecondBrainService` at query time, nothing is
+pre-indexed. No editable graph layout yet, no voice, no proactive
+writes — every write still requires an explicit, separate human
+confirmation, and the graph UI issues none.
 
 ## PURPOSE
 
@@ -1152,6 +1154,235 @@ one projection is excluded from the other for the identical reason —
   across hops — each hop re-queries `get_relationships()` per node,
   fine at the current bounded depth/node caps, a candidate for
   optimization only if those caps grow substantially.
+
+## MAIA KNOWLEDGE GRAPH UI V1 (FASE 4O.4)
+
+A read-only, principal-aware 3D visual projection of the frozen Graph
+API (FASE 4O.3) — `frontend/src/components/KnowledgeGraph/` +
+`frontend/src/lib/graph{Api,Store,Visual,Layout}.ts`. Reached from a new
+"Knowledge Graph" sidebar item, `/knowledge-graph`. Built on React
+Three Fiber + Three.js + Drei (already React-19-compatible; no
+competing 3D/graph library installed alongside them).
+
+**THE UI IS A DERIVED, READ-ONLY VIEW. THE SECOND BRAIN REMAINS
+AUTHORITATIVE.** No component in this feature calls a write endpoint;
+every data fetch in `graphApi.ts` is a `GET` against
+`/v1/second-brain/graph/*`.
+
+Data flow, new this phase:
+
+```
+Second Brain (SQLite, authoritative)
+        ↓  graph.py (4O.3, frozen)
+second_brain_graph_routes.py  -- thin FastAPI GET wrapper, no new logic
+        ↓  HTTP JSON
+graphApi.ts -> graphStore.ts (Zustand: graph truth + layout + UI state)
+        ↓
+graphLayout.ts (deterministic positions)   graphVisual.ts (style mapping)
+        ↓                                          ↓
+              KnowledgeGraphView -> GraphCanvas (R3F)
+```
+
+`server/second_brain_graph_routes.py` was added because this frontend
+(Tauri + a local FastAPI server it already talks to via
+`apiFetch`/`getBase()`) has no other transport to reach a Python
+backend — it is a thin wrapper (routing + query-param parsing only)
+around the exact frozen `graph.py` functions, always resolving the
+actor server-side via `resolve_runtime_principal()` (never accepted
+from the client, so a compromised frontend can never impersonate a
+different identity). This was a deliberate, minimal exception to
+4O.3's "no HTTP dependency" choice — that phase avoided HTTP because it
+had no consumer yet; this phase *is* the consumer, and FastAPI is
+already a running, declared (`pyproject.toml` `[server]` extra)
+dependency of this codebase, not a new one.
+
+## VISUAL GRAMMAR
+
+`graphVisual.ts::styleForNode`/`styleForEdge` — a pure, table-driven
+mapping from real fields to shape/color/size/glow, never invented:
+
+- **DOMAIN** — amber icosahedron, largest, always labeled.
+- **ENTITY** — purple sphere, smallest, label on hover/selection.
+- **ENTRY** — shape/color/size keyed by `entry_type`, sized by
+  "resolved vs. in-progress" weight (OUTCOME/LESSON/DECISION read
+  larger than PROBLEM/HYPOTHESIS/ACTION): PROBLEM=red octahedron,
+  HYPOTHESIS=amber tetrahedron, DECISION=purple box, ACTION=cyan cone,
+  OUTCOME=green sphere, LESSON=cyan icosahedron (brightest glow — the
+  crystallized-knowledge stage); EVENT/OBSERVATION/PROCEDURE/
+  MEETING_NOTE share one neutral, less-emphasized sphere/cylinder
+  treatment.
+- **Lifecycle** (`lifecycleOpacity`) — ACTIVE full presence, SUPERSEDED
+  50% opacity, ARCHIVED 32% opacity: real `archived_at`/`superseded_by`
+  state, never an invented category.
+
+## EDGE TYPES
+
+- **RELATIONSHIP CONFIRMED** — solid, full-opacity cyan.
+- **RELATIONSHIP PROPOSED** — dashed, muted amber — never the same
+  treatment as CONFIRMED.
+- **SUPERSESSION** — its own solid purple treatment (same underlying
+  stored `Relationship`, `relation_type == SUPERSEDES`, singled out for
+  rendering clarity, not a separate data structure).
+- **NAVIGATION** (derived entry↔entity/domain) — the quietest edge on
+  the graph, thin and low-opacity, so structural navigation is never
+  visually confused with a real semantic relationship.
+- **REJECTED** — excluded by default (the API's own default filter);
+  if ever explicitly requested, rendered barely visible, never
+  upgraded to look confirmed.
+
+No styling ever implies causality for a non-causal relationship type
+(e.g. `RELATED_TO`/`SIMILAR_TO` never get the same "directional arrow
+emphasis" treatment as `CAUSES`/`RESULTED_IN` — direction is drawn for
+all RELATIONSHIP edges structurally, but nothing narrative is added).
+
+## CLUSTER MODEL / LAYOUT
+
+`graphLayout.ts::computeGraphLayout` — **Graph Data ≠ Graph Layout
+State**, the STEP 14 boundary, enforced as two separate modules:
+`GraphResponse` (truth, from the API) and `LayoutMap` (a plain
+`{id: {x,y,z}}` computed *from* that truth, never stored back into it,
+never mutating it). DOMAIN nodes anchor a ring (or the origin, if
+there's only one, or nothing at all if there are none — the graph
+still renders safely, entries fall back to an "ungrouped" outer ring);
+ENTRY nodes cluster near the centroid of their own `domains[]`; ENTITY
+nodes cluster near the entries that navigate to them. Domain labels are
+never hardcoded — every cluster label is the real domain/entity string
+from the loaded graph.
+
+Deliberately **not a live force simulation**: positions are computed
+once, deterministically, from an id-seeded hash (zero `Math.random()`
+in the file) — there is nothing to "settle" frame to frame, which is
+how "avoid a constantly vibrating force graph" (STEP 4) is satisfied by
+construction. A future layout mode (organization/plant/process/
+user-custom layout, explicitly out of scope this phase) is just a
+different function with the same `GraphResponse -> LayoutMap` shape
+swapped in — nothing about data fetching, the camera, or interaction
+code would need to change.
+
+## CAMERA
+
+`CameraRig.tsx` — Drei `OrbitControls` (orbit/drag/zoom/pan) plus a
+`useFrame` lerp toward a desired target/offset, never a scripted
+cinematic path. Selecting a node smoothly re-centers the camera on it;
+"Fit graph" frames the current node set's bounding sphere; "Reset
+view" returns to the default framing. All camera motion is bounded,
+continuous interpolation — no jump cuts, no automatic drift when idle.
+
+## SELECTION
+
+`GraphScene.tsx` computes the directly-connected node/edge set for the
+current selection and renders it at full presence while everything
+else quiets to ~15-22% opacity (STEP 8.3/8.4) — purely a rendering
+concern, computed fresh from the graph's own edges, never a separate
+stored "importance." Selecting an `ENTRY` node also fires one bounded
+`fetchGraphNeighborhood(id, depth=1)` call, merged into the already-
+loaded graph via `mergeGraphResponses` (id-based de-duplication, never
+a full reload — STEP 8's "do not reload entire graph on every click").
+`DOMAIN`/`ENTITY` selection does not trigger a fetch — their
+neighborhood is already fully represented by the navigation edges
+already loaded.
+
+## DETAIL PANEL
+
+`DetailPanel.tsx` — for an `ENTRY`: type, trust status, lifecycle,
+visibility, domains, entities, created date, and a relationship list
+(direction, real relation type, CONFIRMED/PROPOSED marker, resolved
+neighbor label). For `DOMAIN`/`ENTITY`: label, derived flag, connected-
+entry count *in the currently loaded view* (explicitly not claimed as a
+whole-brain count). A missing field renders as "not recorded," never
+invented filler prose.
+
+## EXPERIENCE PATH
+
+"Show Experience" (shown on PROBLEM/HYPOTHESIS/DECISION/ACTION/
+OUTCOME/LESSON entries) calls `fetchGraphExperience`, which is the
+frozen `get_experience_graph` (built on the certified
+`get_experience_bundle`, FASE 4N.3/4N.4) — real stored relationship
+type/status/direction, nothing narrated. Live-verified against seeded
+demo data: `PROBLEM → HYPOTHESIS → DECISION → ACTION → OUTCOME`
+returned with the correct entry types and all edges `CONFIRMED` with
+their real `relation_type` (`RELATED_TO`/`DECIDED_IN`/`RESULTED_IN`) —
+`LESSON` fell outside the default `max_hops=4` bound, itself correct,
+bounded behavior, not a bug.
+
+## FILTERS
+
+`FilterBar.tsx` — domain, entry type, trust status, relationship
+status, include archived, include superseded — all forwarded as real
+query parameters to the Graph API (`GraphFilters`/`GraphBounds`
+server-side), never downloaded whole and filtered client-side. Domain
+options are derived from the currently loaded graph's own `DOMAIN`
+nodes, never hardcoded. Live-verified: selecting a domain fired a real
+`?domains=produzione` request and the returned graph (and its own
+domain list) narrowed accordingly; toggling "include archived" fired
+`?include_archived=true` and returned the expected larger node set.
+
+## TRUNCATION UX
+
+`TruncationBanner.tsx` renders only when the backend's own
+`truncated: true` is present — never inferred, never a client-side
+guess — and states plainly that the view is bounded, without claiming
+a specific missing count the API doesn't report. "Fit graph" is
+offered as the safe way to review what *is* loaded; encouraging a
+narrower filter or a neighborhood expansion is the honest path to see
+more, not a "load everything" button (which does not exist in this UI).
+
+## LOADING / EMPTY / NO-ACCESS / ERROR STATES
+
+`GraphStates.tsx` — four distinct, polished states (`GraphLoadingState`,
+`GraphEmptyState`, `GraphNoAccessState`, `GraphErrorState`), gated by
+`graphStore.ts`'s `status` field. No raw JSON or stack trace is ever
+rendered; `GraphErrorState` shows a short, human message with a retry
+action. An empty result renders as an intentional, explained state
+("No active memories match the current filters..."), never as a blank
+canvas that reads as broken.
+
+## LAYOUT / TRUTH SEPARATION (extension point)
+
+Documented explicitly per STEP 14: `computeGraphLayout(graph):
+LayoutMap` is the entire contract a future layout mode needs to
+satisfy. A future "plant layout" or "process layout" or "user-custom
+layout" is a new function with that same signature (or a persisted
+position map merged on top of a freshly computed one) — it changes
+*where things are drawn*, never *what the graph contains*. No future
+layout work can be implemented by mutating Second Brain relationships
+to "make the picture nicer" — position is presentation, not truth, by
+construction.
+
+## PERFORMANCE
+
+Pure-JS layer (`computeGraphLayout` + `mergeGraphResponses`), measured
+against synthetic payloads on the same machine as the FASE 4O.3 backend
+numbers: 100 entries (135 nodes/299 edges) → 11.9 ms layout; 500
+entries (535 nodes/1499 edges) → 1.4 ms; 1000 entries (1035
+nodes/2999 edges) → 4.1 ms; merge stayed under 2 ms at every size. This
+confirms the layout/merge computation itself is not a bottleneck at any
+tested scale. Actual WebGL frame timing for a live 1000-mesh scene was
+not measured in this session (no GPU-compositing browser surface was
+available in this environment for a pixel-level benchmark) — but the
+UI never actually requests 1000 nodes in normal use: the default
+overview `entry_limit` (50) and the Graph API's own hard node cap (200
+default / 1000 absolute max) already keep every interactive scene well
+inside a safe range, inheriting FASE 4O.3's "bounded interactive
+queries, not whole-brain rendering" design rather than needing a
+separate LOD system built for this V1.
+
+## KNOWN LIMITATIONS (added by FASE 4O.4)
+
+- No level-of-detail/instancing strategy exists yet for a
+  hypothetically very large single scene — not needed at V1's bounded
+  query sizes (see PERFORMANCE), but the first thing to add if a future
+  phase raises the default bounds substantially.
+- Live WebGL frame-rate/interaction-latency was not benchmarked with a
+  pixel-level tool in this session (see PERFORMANCE); the pure-JS
+  layer's cost was measured directly and is not the limiting factor at
+  current scales.
+- The relationship-status filter offers CONFIRMED/PROPOSED/REJECTED as
+  single-select, not multi-select — sufficient for V1's minimal filter
+  bar; a future revision could allow combining them if a real need
+  appears.
+- No editable/persisted user layout exists yet (explicitly out of scope
+  this phase) — the extension point is documented above but not built.
 
 ## KNOWN LIMITATIONS (V1)
 

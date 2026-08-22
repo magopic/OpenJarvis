@@ -8,6 +8,7 @@ import { GetStartedPage } from './pages/GetStartedPage';
 import { AgentsPage } from './pages/AgentsPage';
 import { DataSourcesPage } from './pages/DataSourcesPage';
 import { LogsPage } from './pages/LogsPage';
+import { KnowledgeGraphPage } from './pages/KnowledgeGraphPage';
 import { CommandPalette } from './components/CommandPalette';
 import { SetupScreen } from './components/SetupScreen';
 import { Toaster } from './components/ui/sonner';
@@ -188,6 +189,7 @@ export default function App() {
           <Route path="settings" element={<SettingsPage />} />
           <Route path="get-started" element={<GetStartedPage />} />
           <Route path="data-sources" element={<DataSourcesPage />} />
+          <Route path="knowledge-graph" element={<KnowledgeGraphPage />} />
           <Route path="agents" element={<AgentsPage />} />
           <Route path="logs" element={<LogsPage />} />
         </Route>

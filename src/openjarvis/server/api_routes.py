@@ -1113,6 +1113,12 @@ def include_all_routes(app) -> None:
     app.include_router(feedback_router)
     app.include_router(optimize_router)
 
+    from openjarvis.server.second_brain_graph_routes import (
+        router as second_brain_graph_router,  # noqa: PLC0415
+    )
+
+    app.include_router(second_brain_graph_router)
+
     # Agent Manager routes (if available)
     try:
         if hasattr(app.state, "agent_manager") and app.state.agent_manager:
