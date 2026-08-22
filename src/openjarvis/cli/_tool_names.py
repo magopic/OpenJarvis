@@ -17,6 +17,7 @@ _SECOND_BRAIN_TOOL_IDS = (
     "second_brain_confirm_entry",
     "second_brain_link",
     "second_brain_archive",
+    "second_brain_find_related_experiences",  # FASE 4N.4
 )
 
 

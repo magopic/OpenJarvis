@@ -174,6 +174,26 @@ def _fts5_safe_query(text: str) -> str:
     return " ".join('"' + t.replace('"', '""') + '"' for t in tokens)
 
 
+def _fts5_safe_query_or(text: str) -> str:
+    """FASE 4N.4: an OR-joined variant of ``_fts5_safe_query`` for
+    LEVEL_TERM broadening (``find_related_experiences``) only --
+    ``search_entries_fts``/``second_brain_search`` keep using the
+    AND-joined version above, unchanged (frozen since FASE 4N.2A).
+
+    Found live: a query combining a brand-new identifier with genuinely
+    matching descriptive terms (e.g. "Sigma-8 performance degradate",
+    where only "performance degradate" exists in stored content) returned
+    ZERO results under implicit AND, even though part of the query was a
+    strong match -- exactly backwards for a tool whose whole purpose is
+    broadening. FTS5's own ``rank`` (bm25) still orders a row matching
+    more OR-terms above one matching fewer, so switching to OR does not
+    turn this into an unranked bag-of-words match; it only stops one
+    unmatched token from silently zeroing out an otherwise-good match.
+    """
+    tokens = text.split()
+    return " OR ".join('"' + t.replace('"', '""') + '"' for t in tokens)
+
+
 def _entry_to_row(e: SecondBrainEntry) -> tuple:
     return (
         e.id,
@@ -428,21 +448,67 @@ class SecondBrainStore:
         return [_row_to_entry(r) for r in rows]
 
     def search_entries_fts(
-        self, query: str, *, actor: Optional[str] = None, limit: int = 50
+        self,
+        query: str,
+        *,
+        actor: Optional[str] = None,
+        include_archived: bool = False,
+        limit: int = 50,
     ) -> List[SecondBrainEntry]:
+        """FASE 4N.4 bugfix: found live -- an entry archived via
+        ``archive_entry()`` (e.g. FASE 4N.2A/4N.3 test cleanup) still
+        appeared in FTS results, because unlike ``list_entries()`` this
+        query never excluded ``archived_at``. ``include_archived``
+        mirrors ``list_entries()``'s own parameter and default so the
+        two retrieval paths agree; existing callers (``second_brain_search``,
+        ``SecondBrainService.search_entries()``) pass no argument and
+        get the corrected default for free.
+        """
         if not query.strip():
             return []
         clause, clause_params = self._visibility_clause(actor)
+        archived_clause = "" if include_archived else " AND archived_at IS NULL"
         rows = self._conn.execute(
             f"""
             SELECT entries.* FROM entries_fts
             JOIN entries ON entries.rowid = entries_fts.rowid
             WHERE entries_fts MATCH ?
-            {clause}
+            {clause}{archived_clause}
             ORDER BY rank
             LIMIT ?
             """,
             [_fts5_safe_query(query), *clause_params, limit],
+        ).fetchall()
+        return [_row_to_entry(r) for r in rows]
+
+    def search_entries_fts_broad(
+        self,
+        query: str,
+        *,
+        actor: Optional[str] = None,
+        include_archived: bool = False,
+        limit: int = 50,
+    ) -> List[SecondBrainEntry]:
+        """FASE 4N.4 LEVEL_TERM: OR-joined FTS for progressive broadening
+        (``find_related_experiences`` only -- see ``_fts5_safe_query_or``).
+        ``search_entries_fts`` above is unchanged in its own semantics
+        and still what ``second_brain_search``/
+        ``SecondBrainService.search_entries()`` (frozen, FASE 4N.2A) use;
+        both share the same archived-entry bugfix."""
+        if not query.strip():
+            return []
+        clause, clause_params = self._visibility_clause(actor)
+        archived_clause = "" if include_archived else " AND archived_at IS NULL"
+        rows = self._conn.execute(
+            f"""
+            SELECT entries.* FROM entries_fts
+            JOIN entries ON entries.rowid = entries_fts.rowid
+            WHERE entries_fts MATCH ?
+            {clause}{archived_clause}
+            ORDER BY rank
+            LIMIT ?
+            """,
+            [_fts5_safe_query_or(query), *clause_params, limit],
         ).fetchall()
         return [_row_to_entry(r) for r in rows]
 

@@ -19,12 +19,13 @@ identity" in the first place -- there is no parameter for it to fill
 in, spoofed or otherwise.
 
 Tool id <-> conceptual contract name (see docs/MAIA_SECOND_BRAIN_V1.md):
-    second_brain_search         <-> second_brain.search
-    second_brain_get            <-> second_brain.get
-    second_brain_propose_entry  <-> second_brain.propose_entry
-    second_brain_confirm_entry  <-> second_brain.confirm_entry
-    second_brain_link           <-> second_brain.link
-    second_brain_archive        <-> second_brain.archive
+    second_brain_search                   <-> second_brain.search
+    second_brain_get                      <-> second_brain.get
+    second_brain_propose_entry            <-> second_brain.propose_entry
+    second_brain_confirm_entry            <-> second_brain.confirm_entry
+    second_brain_link                     <-> second_brain.link
+    second_brain_archive                  <-> second_brain.archive
+    second_brain_find_related_experiences <-> second_brain.find_related_experiences (FASE 4N.4)
 """
 
 from __future__ import annotations
@@ -584,9 +585,149 @@ class SecondBrainArchiveTool(BaseTool):
         )
 
 
+@ToolRegistry.register("second_brain_find_related_experiences")
+class SecondBrainFindRelatedExperiencesTool(BaseTool):
+    """FASE 4N.4 -- deterministic progressive broadening, in one call.
+
+    second_brain_search stays exactly as it was (frozen, FASE 4N.2) --
+    this is a separate, additional tool (STEP 6 chose "add one focused
+    tool" over silently changing search's behavior) for the specific
+    question "find relevant past experiences for this situation,"
+    which needs broadening logic search never had and was never meant
+    to grow on its own.
+    """
+
+    def __init__(
+        self, service: Optional[SecondBrainService] = None, principal: Optional[str] = None
+    ) -> None:
+        self._service = service or _service()
+        self._principal = principal or resolve_runtime_principal()
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="second_brain_find_related_experiences",
+            description=(
+                "Find historical Second Brain experiences relevant to a CURRENT "
+                "situation -- past PROBLEM/HYPOTHESIS/DECISION/ACTION/OUTCOME/LESSON "
+                "records, never current facts. Runs a fixed, deterministic "
+                "broadening sequence itself (exact entity -> same domain/type -> "
+                "shared terms -> direct relationships) so you do NOT need to guess "
+                "or retry with progressively broader second_brain_search calls -- "
+                "pass everything you know about the current situation (any "
+                "combination of query/domains/entities/entry_types) and this tool "
+                "does the widening. Every result states its 'level' and exactly "
+                "what matched (domain/entity/term/relationship) -- never a "
+                "similarity score. A result being similar does NOT mean it shares "
+                "the current cause and does NOT mean its past action is "
+                "automatically the right one now -- that judgment needs current "
+                "evidence, which this tool does not provide. If the top result is "
+                "part of a chain (e.g. a PROBLEM with a linked DECISION/ACTION/"
+                "OUTCOME/LESSON), that chain is included automatically as a bundle -- "
+                "you do not need to call second_brain_get once per stage. An empty "
+                "result means honestly nothing relevant was found; do not invent one."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Free-text terms from the current situation (optional)."},
+                    "domains": {"type": "array", "items": {"type": "string"}},
+                    "entities": {"type": "array", "items": {"type": "string"}},
+                    "entry_types": {"type": "array", "items": {"type": "string", "enum": _ENTRY_TYPES}},
+                    "since": {"type": "number"},
+                    "until": {"type": "number"},
+                },
+                "required": [],
+            },
+            category="memory",
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        try:
+            candidates = self._service.find_related_experiences(
+                actor=self._principal,
+                query=params.get("query"),
+                domains=params.get("domains"),
+                entities=params.get("entities"),
+                entry_types=params.get("entry_types"),
+                since=params.get("since"),
+                until=params.get("until"),
+            )
+        except SecondBrainValidationError as exc:
+            return ToolResult(
+                tool_name="second_brain_find_related_experiences", success=False, content=str(exc)
+            )
+
+        if not candidates:
+            return ToolResult(
+                tool_name="second_brain_find_related_experiences",
+                success=True,
+                content="No relevant historical experiences found.",
+                metadata={"num_candidates": 0},
+            )
+
+        lines: List[str] = []
+        candidate_dicts: List[Dict[str, Any]] = []
+        for c in candidates:
+            basis_parts = []
+            if c.matched_domains:
+                basis_parts.append(f"domain={c.matched_domains}")
+            if c.matched_entities:
+                basis_parts.append(f"entity={c.matched_entities}")
+            if c.matched_terms:
+                basis_parts.append(f"term={c.matched_terms}")
+            if c.relationship_basis:
+                basis_parts.append(f"relationship=[{'; '.join(c.relationship_basis)}]")
+            lines.append(
+                f"[{c.entry_id}] ({c.historical_entry_type}, {c.active_or_superseded}) "
+                f"{c.title} -- matched via {c.retrieval_level}: {', '.join(basis_parts) or 'n/a'}"
+            )
+            candidate_dicts.append(
+                {
+                    "entry_id": c.entry_id,
+                    "retrieval_level": c.retrieval_level,
+                    "matched_domains": c.matched_domains,
+                    "matched_entities": c.matched_entities,
+                    "matched_terms": c.matched_terms,
+                    "relationship_basis": c.relationship_basis,
+                    "active_or_superseded": c.active_or_superseded,
+                    "type": c.historical_entry_type,
+                }
+            )
+
+        # STEP 5: bundle the top candidate's experience chain automatically
+        # -- bounded, and only for the single strongest match, so this
+        # never turns into an unbounded multi-entry bundling operation.
+        bundle_text = ""
+        top = candidates[0]
+        try:
+            bundle = self._service.get_experience_bundle(top.entry_id, actor=self._principal)
+            if len(bundle.stages) > 1:
+                bundle_lines = [
+                    f"  [{s.entry_id}] ({s.type}, trust={s.trust_status}) {s.title} -- "
+                    f"{s.summary} [{s.relationship_basis}] provenance: {s.provenance}"
+                    for s in bundle.stages
+                ]
+                bundle_text = (
+                    f"\n\nExperience chain for top match [{top.entry_id}]"
+                    + (" (truncated -- more stages exist)" if bundle.truncated else "")
+                    + ":\n" + "\n".join(bundle_lines)
+                )
+        except SecondBrainValidationError:
+            pass
+
+        return ToolResult(
+            tool_name="second_brain_find_related_experiences",
+            success=True,
+            content="\n".join(lines) + bundle_text,
+            metadata={"num_candidates": len(candidate_dicts), "candidates": candidate_dicts},
+        )
+
+
 __all__ = [
     "SecondBrainArchiveTool",
     "SecondBrainConfirmEntryTool",
+    "SecondBrainFindRelatedExperiencesTool",
     "SecondBrainGetTool",
     "SecondBrainLinkTool",
     "SecondBrainProposeEntryTool",

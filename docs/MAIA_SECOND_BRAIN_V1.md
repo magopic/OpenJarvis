@@ -1,13 +1,15 @@
 # MAIA Second Brain V1 — Storage/Domain Foundation + Governed Tools
 
-Status: FASE 4N.3 — storage foundation (4N.1), 6 governed model-callable
+Status: FASE 4N.4 — storage foundation (4N.1), 6 governed model-callable
 tools and the two-step propose/confirm capture workflow (4N.2), stable
-runtime-resolved identity binding (4N.2A), and a certified full
-operational experience cycle (4N.3: PROBLEM → HYPOTHESIS → DECISION →
-ACTION → OUTCOME → LESSON → future retrieval), implemented and tested
-(37/37). No Obsidian sync. No RAG/embeddings. No graph reasoning. No
-proactive/autonomous memory writes — every write still requires an
-explicit, separate human confirmation.
+runtime-resolved identity binding (4N.2A), a certified full operational
+experience cycle (4N.3), and deterministic Retrieval Intelligence V1
+(4N.4: progressive broadening + a 7th tool, `second_brain_find_related_experiences`),
+implemented and tested (51/51). No Obsidian sync. No RAG/embeddings —
+broadening is structured-filter progression, not a vector index. No
+graph reasoning beyond one bounded bundle walk. No proactive/autonomous
+memory writes — every write still requires an explicit, separate human
+confirmation.
 
 ## PURPOSE
 
@@ -218,11 +220,12 @@ Qwen vs. Claude in FASE 4M.5D/E.
 
 ## TOOL CONTRACTS
 
-Six tools, registered in `tools/second_brain_tools.py`, auto-discovered
-by `jarvis ask`/`jarvis chat` exactly like OPS Bridge tools (unioned
-into `resolve_tool_names()` unconditionally — Second Brain tools need
-no live governance check the way OPS Bridge capabilities do, since
-every rule is already enforced inside `SecondBrainService`):
+Seven tools (six from FASE 4N.2, plus one added in FASE 4N.4),
+registered in `tools/second_brain_tools.py`, auto-discovered by
+`jarvis ask`/`jarvis chat` exactly like OPS Bridge tools (unioned into
+`resolve_tool_names()` unconditionally — Second Brain tools need no
+live governance check the way OPS Bridge capabilities do, since every
+rule is already enforced inside `SecondBrainService`):
 
 | Tool id | Contract | Wraps |
 |---|---|---|
@@ -232,12 +235,16 @@ every rule is already enforced inside `SecondBrainService`):
 | `second_brain_confirm_entry` | `second_brain.confirm_entry` | `confirm_entry()` |
 | `second_brain_link` | `second_brain.link` | `create_relationship()` |
 | `second_brain_archive` | `second_brain.archive` | `archive_entry()` |
+| `second_brain_find_related_experiences` (4N.4) | `second_brain.find_related_experiences` | `find_related_experiences()` + `get_experience_bundle()` |
 
-There is no seventh "generic write" tool and no tool that accepts raw
-SQL or an arbitrary trust-status mutation. Every tool is a thin
-pass-through to `SecondBrainService` — none of them contain governance
-logic of their own, so there is exactly one place (the service) where
-the rules could ever drift from what's enforced.
+There is no "generic write" tool and no tool that accepts raw SQL or an
+arbitrary trust-status mutation. Every tool is a thin pass-through to
+`SecondBrainService` — none of them contain governance logic of their
+own, so there is exactly one place (the service) where the rules could
+ever drift from what's enforced. The new tool is no exception: all of
+its broadening logic lives in the service (`retrieval.py` + the
+`find_related_experiences`/`get_experience_bundle` methods), not in the
+tool itself, which only renders the result.
 
 ## CAPTURE WORKFLOW
 
@@ -492,6 +499,17 @@ Second Brain free-text query was phrased in Italian while the seeded
 test content was in English, and FTS5 found no match on wording alone —
 see KNOWN LIMITATIONS.)
 
+**Re-verified in FASE 4N.4** with the fixed retrieval path and a real
+historical match available: asked in one message "è la stessa causa
+dei casi precedenti?" alongside a current OPS KPI question, the model
+called both `second_brain_find_related_experiences` and
+`ops_dynamic_production_get_kpi` in the same turn, presented the OEE
+figure and the historical Theta-6/Sigma-8 experience chain in clearly
+separate sections, and stated plainly: *"Non posso affermare che la
+causa per la Sigma-8 sia la stessa... può suggerire cosa investigare,
+ma non certifica la causa attuale."* No fictional company conclusion
+was written; the two evidence sources coexisted without merging.
+
 ## SIMILAR CASE RETRIEVAL (no embeddings)
 
 V1 similarity is **structural overlap only** — the same `domain`/
@@ -526,6 +544,142 @@ trigger the broader search despite the instruction. This is reported
 as an honest, live-observed model-behavior characteristic — not a
 defect in the retrieval mechanism itself, which was independently
 confirmed correct by direct, non-model tool invocation in every case.
+
+**Superseded by FASE 4N.4's Retrieval Intelligence** (see below): that
+finding was exactly the problem 4N.4 set out to remove. Prompt wording
+can nudge a model toward broadening; it cannot guarantee it. FASE 4N.4
+makes broadening the runtime's job, not the model's, so this
+limitation no longer depends on how a question happens to be phrased.
+
+## RETRIEVAL INTELLIGENCE (FASE 4N.4)
+
+FASE 4N.3 found, live, that the model does not reliably choose to
+broaden a narrow search on its own inside one complex message — see
+above. FASE 4N.4's answer is architectural, not another prompt tweak:
+`SecondBrainService.find_related_experiences()` runs a **fixed,
+deterministic sequence** of the exact same structured queries the
+frozen store already had (`list_entries`/`search_entries_fts`-family),
+so a model no longer has to invent the right sequence of
+`second_brain_search` calls — one call to the new
+`second_brain_find_related_experiences` tool runs the whole sequence
+itself.
+
+`second_brain_search` is **unchanged** — a separate, additional tool
+was added (STEP 6's choice) rather than silently changing a frozen
+tool's behavior underneath existing callers.
+
+## PROGRESSIVE BROADENING
+
+Four fixed levels, run in this order, each only if its required input
+was supplied (`src/openjarvis/second_brain/retrieval.py`):
+
+| Level | Trigger | Underlying query |
+|---|---|---|
+| `EXACT` | `entities` given | `list_entries(entity=...)` per entity |
+| `STRUCTURED` | `domains` given | `list_entries(domain=..., entry_type=...)` per domain × type |
+| `TERM` | `query` given | OR-joined FTS (`search_entries_fts_broad` — new, see below) |
+| `RELATIONSHIP` | (always, bounded) | `get_relationships()` on up to 5 top seed candidates, CONFIRMED only |
+
+Bounded at every level (STEP 2's "must not return the entire Second
+Brain"): each level's own store query is capped
+(`_PER_LEVEL_LIMIT = 10`), `RELATIONSHIP` only expands from the
+strongest `_MAX_RELATIONSHIP_SEEDS = 5` candidates found so far (not
+every candidate), and the final merged result is capped at
+`_DEFAULT_MAX_CANDIDATES = 15`. None of this depends on database size —
+the bounds are fixed constants, not a fraction of the table.
+
+**Bugfix found live, fixed in this phase**: a query combining a
+brand-new identifier with genuinely matching descriptive terms (e.g.
+"Sigma-8 performance degradate", where only "performance degradate"
+exists in stored content) returned **zero** results under FTS5's
+default implicit-AND semantics — backwards for a tool whose purpose is
+broadening. `TERM` now uses a new OR-joined query
+(`store.py::_fts5_safe_query_or` / `search_entries_fts_broad`) — FTS5's
+own `rank` (bm25) still orders a row matching more terms above one
+matching fewer, so this is not an unranked bag-of-words match, just no
+longer one where a single unmatched word can zero out an otherwise-good
+result. `second_brain_search`'s own AND-joined FTS
+(`search_entries_fts`, used by `SecondBrainService.search_entries()`)
+is untouched — this fix is scoped to the new broadening path only.
+Regression-tested: `test_term_query_with_one_unmatched_word_still_matches`.
+
+**A second bugfix found in the same live session**: an archived entry
+(correctly excluded by `list_entries()`) still appeared in FTS results
+— `search_entries_fts()` never checked `archived_at` at all. Fixed for
+both the frozen FTS path and the new broad one (`include_archived: bool
+= False` parameter added to both, matching `list_entries()`'s existing
+convention); every existing caller keeps its previous call signature
+and gets the corrected default automatically.
+Regression-tested: `test_o_fts_search_excludes_archived_entries`.
+
+## MATCH BASIS
+
+Every `RetrievalCandidate` (`retrieval.py`) carries exactly why it
+matched — `matched_domains`, `matched_entities`, `matched_terms`,
+`relationship_basis` — populated only from the structured query that
+actually found it. **No synthetic similarity percentage exists
+anywhere in this codebase** (verified structurally in FASE 4N.3's
+`test_similar_case_retrieval_no_automatic_causality` and re-verified
+here); the tool renders each candidate's basis directly into
+`content` (STEP 3's "do not let the model fabricate match reasons" —
+there is nothing to fabricate, the reason is read off stored structure).
+
+Live-verified: the model's rendered basis lines read, verbatim, things
+like `matched via TERM: term=['performance degradate linea produzione']`
+and `relationship=[RESULTED_IN (CONFIRMED) via <id>]` — exactly the
+underlying match, not a paraphrase or an invented explanation.
+
+## EXPERIENCE BUNDLES
+
+`SecondBrainService.get_experience_bundle(anchor_entry_id, actor=...)`
+— a bounded breadth-first walk over **CONFIRMED relationships only**
+(STEP 9-L: a `PROPOSED` relationship is a model's unverified inference,
+not certified structure; following it would let an unconfirmed guess
+masquerade as part of the experience chain) starting from one anchor
+entry, capped at `_DEFAULT_MAX_BUNDLE_HOPS = 8` hops and
+`_DEFAULT_MAX_BUNDLE_ENTRIES = 12` entries. Each stage keeps its own
+`id`/`type`/`summary`/`trust_status`/`provenance`/relationship-basis —
+**never collapsed into one generated summary**, which would lose
+exactly the distinctions FASE 4N.3 built LESSON governance and
+trust-lifecycle tracking to preserve.
+
+`second_brain_find_related_experiences` bundles automatically for the
+single strongest candidate only (not every candidate — STEP 12's
+bounds) after every search, so a model does not need to make one
+`second_brain_get` call per chain stage the way it did before this
+phase (FASE 4N.3's live test needed 5 separate `second_brain_get`
+calls to walk one chain; FASE 4N.4 needed 0 — the bundle arrived with
+the first search).
+
+## ACTIVE VERSION POLICY
+
+A `SUPERSEDED` candidate (`entry.superseded_by is not None`) is
+resolved to its active replacement (`_resolve_active()`, following the
+supersession chain forward, bounded by construction since no entry can
+supersede itself) before being returned — the replacement's match
+reasons absorb the superseded entry's, tagged
+`relationship_basis=[..., "supersedes <old_id>"]`, so the connection to
+the corrected version stays visible rather than silently disappearing.
+`get_entry()` by id is untouched — a caller (or a human) can still
+fetch the original superseded entry directly for historical inspection
+at any time; only the *discovery* path (search/broadening) prefers the
+active version, never the storage layer itself.
+
+## RETRIEVAL BOUNDS (V1 limits, explicit)
+
+- Candidates: capped at 15 total (`max_candidates`, overridable per call).
+- Per-level store queries: capped at 10 each.
+- Relationship expansion: from at most 5 seed candidates, not all of them.
+- Experience bundle: at most 8 hops / 12 entries; `bundle.truncated`
+  is set `True` when either bound was hit, so a caller can tell a
+  complete chain from a cut-off one.
+- Measured on the FASE 4N.4 test dataset: `find_related_experiences`
+  ~3.6ms, `get_experience_bundle` ~1.1ms, rendered tool `content` for a
+  10-candidate result with a 6-stage bundle ≈ 4.5KB — comfortably
+  within normal tool-result sizes, no full-database dump.
+- None of these bounds scale with database size — they are fixed
+  constants (`retrieval.py`), so behavior stays predictable as the
+  Second Brain grows.
 
 ## ANTI-CAUSALITY RULES
 
@@ -590,17 +744,29 @@ changes through.
   knowing when composing a search: prefer structured filters
   (`domain`/`entity`/`type`) over free text alone when language might
   differ between the query and the stored content.
-- **Broader-search fallback is a prompted behavior, not a guarantee**
-  (found live in FASE 4N.3 STEP 8/9): when an entity-specific search
-  correctly finds nothing, the tool description instructs trying a
-  broader domain-level search before concluding nothing similar
-  exists. Live testing showed this works reliably for a simple, direct
-  request, but not with complete reliability inside one long message
-  bundling many sub-questions at once. The retrieval mechanism itself
-  was independently confirmed correct in every case (direct
-  non-model tool invocation always found the right entries); this is a
-  live-observed model-behavior characteristic under complex prompts,
-  not a defect in `SecondBrainService`/`SecondBrainStore`.
+- **RESOLVED in FASE 4N.4**: "broader-search fallback is a prompted
+  behavior, not a guarantee" (FASE 4N.3's top limitation) — broadening
+  is now `find_related_experiences()`'s own fixed algorithm, not
+  something a model has to remember to attempt. Live-verified: the
+  exact combination that failed in FASE 4N.3 (one long message bundling
+  several sub-questions) succeeded reliably in FASE 4N.4 once the model
+  called the new tool with any reasonable domain/entity/term hint —
+  including composed with a current OPS fact in the same turn.
+  **What still depends on the model**: which `query`/`domains`/
+  `entities`/`entry_types` values to pass in the first place — the
+  tool cannot broaden using information it was never given. A model
+  that passes nothing at all still gets an honest empty result, not a
+  fabricated one (verified: STEP 9-K, live query 8).
+- **Cross-language free-text matching is improved, not solved**: the
+  new OR-joined `TERM` level (see PROGRESSIVE BROADENING) means a query
+  with *any* overlapping word now matches, which meaningfully softens
+  the FASE 4N.3 cross-language gap in practice (a query sharing even
+  one cognate/borrowed term with the stored content can now match).
+  It is still not translation — a query and stored content with zero
+  shared tokens in any language will not match on `TERM` alone.
+  Structured filters (`domains`/`entities`) remain unaffected by
+  language entirely and are the more reliable broadening axis when
+  available.
 - **RESOLVED in FASE 4N.2A** (was the top limitation as of 4N.2): the
   cross-invocation identity gap is fixed at the runtime/tool boundary
   — see AUTHORIZATION above. What remains is a narrower, explicitly

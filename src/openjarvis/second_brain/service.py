@@ -20,6 +20,23 @@ from openjarvis.second_brain.errors import (
     SecondBrainAuthorizationError,
     SecondBrainValidationError,
 )
+from openjarvis.second_brain.retrieval import (
+    LEVEL_EXACT,
+    LEVEL_RELATIONSHIP,
+    LEVEL_STRUCTURED,
+    LEVEL_TERM,
+    _DEFAULT_MAX_BUNDLE_ENTRIES,
+    _DEFAULT_MAX_BUNDLE_HOPS,
+    _DEFAULT_MAX_CANDIDATES,
+    _LEVEL_PRIORITY,
+    _MAX_RELATIONSHIP_SEEDS,
+    _PER_LEVEL_LIMIT,
+    ExperienceBundle,
+    ExperienceBundleItem,
+    RetrievalCandidate,
+    _merge_into,
+    _to_candidate,
+)
 from openjarvis.second_brain.store import SecondBrainStore
 from openjarvis.second_brain.types import (
     AuditEventType,
@@ -392,6 +409,243 @@ class SecondBrainService:
             until=until,
             limit=limit,
         )
+
+    def _resolve_active(self, entry: SecondBrainEntry, *, actor: Optional[str]) -> SecondBrainEntry:
+        """Follow ``superseded_by`` forward to the newest version (STEP 4).
+
+        Bounded by construction: each hop must point at a strictly
+        different id, and entries are never superseded by themselves,
+        so this terminates in at most ``len(entries)`` hops -- in
+        practice a handful at most, since supersession chains are short.
+        """
+        seen = {entry.id}
+        current = entry
+        while current.superseded_by and current.superseded_by not in seen:
+            newer = self._store.get_entry(current.superseded_by)
+            if newer is None:
+                break
+            seen.add(newer.id)
+            current = newer
+        return current
+
+    def find_related_experiences(
+        self,
+        *,
+        actor: Optional[str] = None,
+        query: Optional[str] = None,
+        domains: Optional[List[str]] = None,
+        entities: Optional[List[str]] = None,
+        entry_types: Optional[List[Union[EntryType, str]]] = None,
+        since: Optional[float] = None,
+        until: Optional[float] = None,
+        max_candidates: int = _DEFAULT_MAX_CANDIDATES,
+    ) -> List[RetrievalCandidate]:
+        """Retrieval Intelligence V1 (FASE 4N.4) -- deterministic
+        progressive broadening. See ``second_brain/retrieval.py`` for
+        the full rationale.
+
+        Runs LEVEL_EXACT -> LEVEL_STRUCTURED -> LEVEL_TERM ->
+        LEVEL_RELATIONSHIP in that fixed order (only the levels whose
+        required input was actually supplied), merging repeat matches
+        rather than duplicating them, and returns a bounded,
+        deterministically-ordered list: SUPERSEDED entries are resolved
+        to their active replacement (STEP 4) and sorted after ACTIVE
+        ones, ties broken by retrieval level then recency. This method
+        performs no new database work beyond what ``list_entries``/
+        ``search_entries``/``get_relationships`` already did -- it only
+        fixes the *order and completeness* of calling them.
+        """
+        by_id: Dict[str, RetrievalCandidate] = {}
+        entry_types_norm = (
+            [_coerce_enum(t, EntryType, "entry_types") for t in entry_types]
+            if entry_types
+            else [None]
+        )
+
+        def _add(entry: SecondBrainEntry, level: str, **matched: List[str]) -> None:
+            if entry.id in by_id:
+                _merge_into(by_id[entry.id], **matched)
+                return
+            candidate = _to_candidate(entry, level=level)
+            _merge_into(candidate, **matched)
+            by_id[entry.id] = candidate
+
+        # LEVEL 1 -- EXACT: explicit entity identifiers only.
+        for entity in entities or []:
+            for entry in self._store.list_entries(
+                actor=actor, entity=entity, limit=_PER_LEVEL_LIMIT
+            ):
+                _add(entry, LEVEL_EXACT, matched_entities=[entity])
+
+        # LEVEL 2 -- STRUCTURED: domain, optionally narrowed by type.
+        for domain in domains or []:
+            for etype in entry_types_norm:
+                for entry in self._store.list_entries(
+                    actor=actor, domain=domain, entry_type=etype, limit=_PER_LEVEL_LIMIT
+                ):
+                    _add(entry, LEVEL_STRUCTURED, matched_domains=[domain])
+
+        # LEVEL 3 -- TERM: free-text FTS, OR-joined (search_entries_fts_broad,
+        # not the AND-joined search_entries_fts second_brain_search uses) --
+        # a broadening search must not let one unmatched word (e.g. a
+        # brand-new entity name typed alongside real descriptive terms)
+        # zero out an otherwise-good match. See _fts5_safe_query_or.
+        if query:
+            for entry in self._store.search_entries_fts_broad(
+                query, actor=actor, limit=_PER_LEVEL_LIMIT
+            ):
+                _add(entry, LEVEL_TERM, matched_terms=[query])
+
+        # LEVEL 4 -- RELATIONSHIP: direct neighbors of the strongest
+        # candidates found so far, not of every candidate -- bounded.
+        seed_ids = sorted(
+            by_id, key=lambda eid: _LEVEL_PRIORITY[by_id[eid].retrieval_level]
+        )[:_MAX_RELATIONSHIP_SEEDS]
+        for seed_id in seed_ids:
+            for rel in self._store.get_relationships(
+                seed_id, direction="both", status=RelationshipStatus.CONFIRMED
+            ):
+                other_id = (
+                    rel.target_entry_id if rel.source_entry_id == seed_id else rel.source_entry_id
+                )
+                other = self._store.get_entry(other_id)
+                if other is None:
+                    continue
+                if other.visibility is Visibility.PRIVATE and other.created_by != actor:
+                    continue  # fail closed, same rule as every other read path
+                _add(
+                    other,
+                    LEVEL_RELATIONSHIP,
+                    relationship_basis=[f"{rel.relation_type.value} ({rel.status.value}) via {seed_id}"],
+                )
+
+        # Active-version policy (STEP 4): a SUPERSEDED candidate is
+        # replaced by its active successor in the result set, carrying
+        # its match reasons forward, unless the successor is already
+        # present (then the reasons are merged instead of duplicated).
+        resolved: Dict[str, RetrievalCandidate] = {}
+        for candidate in by_id.values():
+            if candidate.active_or_superseded == "ACTIVE":
+                resolved.setdefault(candidate.entry_id, candidate)
+                continue
+            entry = self._store.get_entry(candidate.entry_id)
+            active_entry = self._resolve_active(entry, actor=actor) if entry else None
+            if active_entry is None or active_entry.id == candidate.entry_id:
+                resolved.setdefault(candidate.entry_id, candidate)
+                continue
+            if active_entry.id in resolved:
+                _merge_into(
+                    resolved[active_entry.id],
+                    matched_domains=candidate.matched_domains,
+                    matched_entities=candidate.matched_entities,
+                    matched_terms=candidate.matched_terms,
+                    relationship_basis=candidate.relationship_basis
+                    + [f"supersedes {candidate.entry_id}"],
+                )
+            else:
+                active_candidate = _to_candidate(active_entry, level=candidate.retrieval_level)
+                _merge_into(
+                    active_candidate,
+                    matched_domains=candidate.matched_domains,
+                    matched_entities=candidate.matched_entities,
+                    matched_terms=candidate.matched_terms,
+                    relationship_basis=candidate.relationship_basis
+                    + [f"supersedes {candidate.entry_id}"],
+                )
+                resolved[active_entry.id] = active_candidate
+
+        ordered = sorted(
+            resolved.values(),
+            key=lambda c: (
+                0 if c.active_or_superseded == "ACTIVE" else 1,
+                _LEVEL_PRIORITY[c.retrieval_level],
+                c.entry_id,
+            ),
+        )
+        return ordered[:max_candidates]
+
+    def get_experience_bundle(
+        self,
+        anchor_entry_id: str,
+        *,
+        actor: Optional[str] = None,
+        max_hops: int = _DEFAULT_MAX_BUNDLE_HOPS,
+        max_entries: int = _DEFAULT_MAX_BUNDLE_ENTRIES,
+    ) -> ExperienceBundle:
+        """STEP 5: retrieve a coherent historical experience -- PROBLEM,
+        HYPOTHESIS, DECISION, ACTION, OUTCOME, LESSON where linked -- as
+        one bounded bundle, instead of requiring a model to make one
+        ``second_brain_get`` call per hop.
+
+        A bounded breadth-first walk over CONFIRMED relationships only
+        (a PROPOSED relationship is a model's unverified inference, not
+        yet part of certified structure -- including it here would let
+        an unconfirmed guess masquerade as an experience chain). Each
+        stage keeps its own id/type/summary/trust_status/provenance --
+        never collapsed into one generated summary that would lose
+        exactly the distinctions FASE 4N.3 built LESSON governance and
+        trust-lifecycle tracking to preserve.
+        """
+        anchor = self.get_entry(anchor_entry_id, actor=actor)
+        if anchor is None:
+            raise SecondBrainValidationError(f"No such entry: {anchor_entry_id}")
+
+        bundle = ExperienceBundle(anchor_entry_id=anchor_entry_id)
+        visited = {anchor.id}
+        bundle.stages.append(
+            ExperienceBundleItem(
+                entry_id=anchor.id,
+                type=anchor.type.value,
+                title=anchor.title,
+                summary=anchor.summary,
+                trust_status=anchor.trust_status.value,
+                provenance=anchor.provenance,
+                relationship_basis="anchor",
+            )
+        )
+
+        frontier = [anchor.id]
+        hops = 0
+        while frontier and hops < max_hops and len(bundle.stages) < max_entries:
+            hops += 1
+            next_frontier: List[str] = []
+            for current_id in frontier:
+                for rel in self._store.get_relationships(
+                    current_id, direction="both", status=RelationshipStatus.CONFIRMED
+                ):
+                    other_id = (
+                        rel.target_entry_id
+                        if rel.source_entry_id == current_id
+                        else rel.source_entry_id
+                    )
+                    if other_id in visited:
+                        continue
+                    other = self._store.get_entry(other_id)
+                    if other is None:
+                        continue
+                    if other.visibility is Visibility.PRIVATE and other.created_by != actor:
+                        continue
+                    visited.add(other_id)
+                    bundle.stages.append(
+                        ExperienceBundleItem(
+                            entry_id=other.id,
+                            type=other.type.value,
+                            title=other.title,
+                            summary=other.summary,
+                            trust_status=other.trust_status.value,
+                            provenance=other.provenance,
+                            relationship_basis=f"{rel.relation_type.value} ({rel.status.value}) via {current_id}",
+                        )
+                    )
+                    next_frontier.append(other_id)
+                    if len(bundle.stages) >= max_entries:
+                        break
+                if len(bundle.stages) >= max_entries:
+                    break
+            frontier = next_frontier
+
+        bundle.truncated = bool(frontier) and (hops >= max_hops or len(bundle.stages) >= max_entries)
+        return bundle
 
     def archive_entry(self, entry_id: str, *, actor: str) -> SecondBrainEntry:
         _require_nonempty_str(actor, "actor")

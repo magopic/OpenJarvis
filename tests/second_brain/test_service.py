@@ -349,6 +349,20 @@ def test_o_fts_search(service: SecondBrainService):
     assert results[0].title == "Fermo linea M"
 
 
+def test_o_fts_search_excludes_archived_entries(service: SecondBrainService):
+    """FASE 4N.4 bugfix, found live: an archived entry still appeared in
+    FTS results (list_entries() correctly excluded it, search_entries_fts()
+    never checked archived_at at all)."""
+    entry = service.create_entry(
+        type=EntryType.EVENT, title="Fermo linea N", summary="Cambio formato sulla linea N",
+        created_by="user:luigi", provenance="x", source="conversation",
+        trust_status=EntryTrustStatus.OBSERVED, domains=["production"],
+    )
+    service.archive_entry(entry.id, actor="user:luigi")
+    results = service.search_entries("cambio formato", actor="user:luigi")
+    assert results == []
+
+
 def test_o_fts_search_handles_fts5_special_characters(service: SecondBrainService):
     """FASE 4N.2A regression: a bareword like 'Zeta-9' used to crash FTS5
     with 'no such column: 9' (found live, Claude Sonnet 4.6 hit this on
