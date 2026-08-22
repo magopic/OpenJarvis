@@ -711,27 +711,212 @@ testare, non una certezza"* — a starting point for investigation, not
 an automatic conclusion or an automatically-recommended repeat action.
 
 
-## FUTURE OBSIDIAN BOUNDARY (not implemented here)
+## OBSIDIAN PROJECTION V1 (FASE 4O.2)
 
-`connectors/obsidian.py` already reads a vault (`.md`/`.markdown`/
-`.txt`, YAML frontmatter) into `knowledge.db` — one-way, read-only, and
-unrelated to the Second Brain today. The proposed future model (FASE
-4N Step 1 design, unchanged):
+One-way, implemented: `second_brain/projections/obsidian.py` (pure
+rendering: slugs, filenames, frontmatter, note/page bodies) +
+`projections/obsidian_sync.py` (`ObsidianProjection`: manifest-tracked
+rebuild/update orchestration). Deliberately kept outside
+`service.py`/`store.py`/`types.py` — a projection is a *consumer* of
+the governed API, never part of it, and every read in this module goes
+through `SecondBrainService` exactly like a tool would.
+
+`connectors/obsidian.py` (pre-existing, unchanged) reads a vault into
+`knowledge.db` — the opposite direction, for a different purpose
+(general document ingestion, not Second Brain). The two are never
+combined into one component; mixing them would blur the exact one-way
+boundary this phase exists to keep sharp.
 
 ```
-Second Brain (SQLite, source of truth for governance/trust_status)
-        ↕ (future — not implemented)
-Markdown Vault (Obsidian, Human Knowledge Workspace)
+SECOND BRAIN (SQLite, authoritative, unchanged by any export)
+        ↓  ObsidianProjection.rebuild() / .update()
+MARKDOWN VAULT (derived, read-only, per-principal)
 ```
 
-Export: each `SecondBrainEntry` → one `.md` file, YAML frontmatter
-(`id`, `type`, `trust_status`, `domains`, relationships as
-`[[wikilinks]]`), `summary` as body. Import: reuse the existing
-`obsidian.py` parser to detect human edits and reconcile them back —
-always landing as `PROPOSED`, never auto-certified. Obsidian is never
-the primary database, never the Capability Registry, never a
-governance authority — it is a mirror for humans to read and propose
-changes through.
+## SOURCE OF TRUTH
+
+The Second Brain remains authoritative in every case — **no code path
+in this module ever reads a vault file and writes it back**. Every
+generated note declares this in both frontmatter (`generated: true`,
+`source_of_truth: false`) and a rendered body warning (STEP 10) — never
+documentation-only. Editing a generated note has zero effect; the next
+`rebuild()`/`update()` overwrites it.
+
+## VAULT STRUCTURE
+
+```
+<vault>/
+  .maia_projection_manifest.json      ← projection metadata, never business data
+  MAIA/
+    Dashboard/Dashboard.md
+    Problems/  Hypotheses/  Decisions/  Actions/
+    Outcomes/  Lessons/  Procedures/  Meeting Notes/
+    Events/  Observations/
+    _Entities/     ← one derived page per unique entities[] value
+    _Domains/      ← one derived page per unique domains[] value
+    _Superseded/   ← historical versions, excluded from active indexes
+    _Archived/     ← archived entries, excluded from active indexes
+```
+
+Folders map 1:1 to the frozen `EntryType` vocabulary — no `Projects`/
+`People`/`Assets` folders exist, since those aren't `EntryType`s;
+they're free-text values inside `entities[]`/`domains[]`, surfaced
+instead as derived `_Entities`/`_Domains` pages (STEP 3/7, confirmed
+against FASE 4O.1's audit rather than assumed). An entry with
+`archived_at` set always lands in `_Archived` (checked first); one with
+only `superseded_by` set lands in `_Superseded`; otherwise its type
+folder.
+
+## NOTE MODEL
+
+Filename: `<TYPE>_<date>_<slug-title>_<id-prefix>.md` — deterministic
+given the entry's current state, Windows-safe (strips `<>:"/\|?*` and
+control characters, guards reserved names like `CON`/`PRN`), Unicode-
+preserving (Italian accented characters pass through unchanged — NTFS
+handles Unicode natively, transliterating would only make notes harder
+to recognize). The 8-char id prefix makes every filename globally
+unique even with identical titles, and makes the bare filename usable
+directly as a wikilink target with no folder-path ambiguity.
+
+Body: title, read-only warning, Summary, Lifecycle/Trust, Relationships,
+Evidence References — no LLM-generated text anywhere in this module;
+every line is templated from real `SecondBrainEntry`/`Relationship`
+fields.
+
+## FRONTMATTER
+
+1:1 with real fields, nothing invented: `second_brain_id`, `type`,
+`trust_status`, `outcome_backed` (LESSON/LEARNED only, reusing FASE
+4N.3's `is_outcome_backed()`), `visibility`, `domains`, `entities`,
+`created_by`, `provenance`, `source`, `confidence`, `event_timestamp`,
+`created_at`, `superseded_by`, `archived`, `evidence_references`
+(`capability`/`domain`/`metric`/`period`/`filters`/
+`trust_status_at_capture`/`fetched_at` — **never a numeric value**,
+since `EvidenceReference` has no value field to copy, verified
+structurally by `test_n_evidence_references_no_kpi_value`).
+
+## RELATIONSHIPS
+
+Rendered as real Obsidian wikilinks (`[[filename]]`) pointing at the
+actual related note, with direction (`→`/`←`), relation type, and a
+visually distinct status marker — `✅ CONFIRMED`, `🟡 PROPOSED
+(unconfirmed)` — never the same styling for both (STEP 6/STEP 14-D).
+`REJECTED` relationships are excluded from the rendered body by
+default. If the related entry isn't resolvable for the current
+principal (PRIVATE to someone else, or genuinely absent), the
+relationship line is **silently omitted** — never rendered as a
+placeholder, since even "a restricted relationship exists here" would
+leak information about content the principal cannot read.
+
+## ENTITY/DOMAIN PAGES
+
+One derived page per unique `entities[]`/`domains[]` value across all
+entries visible to the principal, tagged `derived: true` and explicitly
+labeled as navigation only: *"co-occurrence here is navigation only,
+never a causal or semantic relationship"* — the same anti-causality
+discipline already certified for retrieval (FASE 4N.3/4N.4), now
+carried into the projection layer too. Lists only active (non-archived,
+non-superseded) entries by default.
+
+## SECURITY
+
+Enforced **before serialization**, not by hiding output: every read
+goes through `SecondBrainService.list_entries()`/`get_entry()`, the
+exact same fail-closed visibility clause certified in FASE 4N.2A/4N.4
+(`visibility != 'PRIVATE' OR created_by = ?`, `actor` bound as a
+parameter so a missing/wrong principal can never match). A PRIVATE
+entry owned by a different principal is never fetched, so it can never
+reach a rendered file — not filtered afterward, not present at all.
+
+Live-verified with the real CLI, two separate vault runs, no scripting
+shortcuts: the entry's owner (`local-os-user:Luigi`) exported it
+correctly; a different principal (`test-stranger:nobody`) exporting
+against the exact same Second Brain got **zero** entry notes, an
+honest all-zero dashboard, and grep-verified zero occurrences of the
+PRIVATE entry's id or title anywhere in that principal's vault.
+Isolated-test-covered too (`test_ef_private_owner_exported_other_not`,
+`test_f_unresolved_principal_fails_closed`).
+
+## SUPERSEDED / ARCHIVED
+
+Both preserved permanently, never deleted — `_Superseded` notes link
+forward to their active replacement (`[[...]]`) and stay independently
+fetchable; `_Archived` notes stay in the vault, just excluded from
+Dashboard/entity/domain default listings. Live and isolated-verified
+(`test_g_superseded_historical_folder_and_link`,
+`test_h_archived_folder`; the real vault smoke test's 19 `_Archived`
+notes are FASE 4N.3/4N.4's own prior test chains, still intact and
+inspectable).
+
+## REBUILD
+
+`ObsidianProjection.rebuild()`: deletes and regenerates the entire
+`MAIA/` tree from scratch, deterministically. Idempotent — no
+wall-clock timestamp is embedded in any rendered file, so two
+back-to-back rebuilds of an unchanged Second Brain produce byte-
+identical output (`test_j_rebuild_twice_identical`). Always available
+as the correctness ground truth every other operation can fall back to.
+
+## INCREMENTAL SYNC
+
+`ObsidianProjection.update()`: compares each visible entry's own
+`updated_at` (and its currently-computed path, to catch title/type/
+archival/supersession changes) against what the manifest recorded last
+time, and only re-renders what changed — a thin filter over the exact
+same per-entry renderer `rebuild()` uses, so its correctness for entry-
+content changes is inherited, not independently re-verified. Falls
+back to a full `rebuild()` whenever the manifest is missing, unreadable
+(including deliberately-corrupted, `test_p_interrupted_projection_recoverable_via_rebuild`),
+or belongs to a different principal — never guesses at a partial state.
+
+**Honestly scoped as PARTIAL, not silently incomplete**: a relationship
+created or confirmed between two *already-rendered* entries does not
+change either entry's `updated_at` (relationships live in a separate
+table), so `update()` alone will not notice a relationship-only change
+and refresh the affected "Relationships" sections. The alternative
+(diffing the audit log for relationship events) was evaluated and
+rejected — audit records can carry a PRIVATE entry's title in `details`
+even for a principal who cannot read that entry, and this module has no
+reason to open that privacy surface just to make incremental sync
+slightly more complete. Mitigation: run `update()` often, `rebuild()`
+periodically — the exact hybrid strategy FASE 4O.1's audit already
+recommended, not a new invention.
+
+## MANIFEST
+
+`.maia_projection_manifest.json` at the vault root (hidden dotfile,
+sibling to Obsidian's own `.obsidian/`): `version`, `principal`,
+`last_sync_at`, and per-entry `{relative_path, updated_at}`. Pure
+projection metadata — never a second copy of business data, never
+consulted by `rebuild()` (which regenerates from the Second Brain
+alone), only by `update()` as its change-detection cursor.
+
+## CLI
+
+`jarvis second-brain export-obsidian` (`cli/second_brain_cmd.py`, a
+new `second-brain` command group — deliberately not reusing `jarvis
+vault`, which already means something unrelated: the encrypted
+credential store). Options: `--vault` (default
+`~/.openjarvis/obsidian_vault/`, inside OpenJarvis' own config
+directory so a bare default run can never collide with a user's real
+personal vault), `--principal` (defaults to
+`resolve_runtime_principal()`, the same identity every Second Brain
+tool already uses), `--rebuild` (force full rebuild), `--force`
+(required to write into a non-empty directory that isn't already a
+MAIA projection — refuses by default, so a mistaken `--vault` pointing
+at an unrelated real vault is never silently overwritten).
+
+## KNOWN LIMITATIONS (added by FASE 4O.2)
+
+- Incremental `update()` does not detect relationship-only changes
+  (see INCREMENTAL SYNC above) — mitigated by periodic `rebuild()`,
+  not solved.
+- No import/reconciliation path exists — this phase is one-way only,
+  exactly as scoped; Obsidian edits are never read back.
+- Multi-vault-per-principal is the only supported topology in V1 — a
+  single vault mixing content from multiple principals was
+  deliberately not designed, to keep the security boundary simple and
+  obviously correct rather than cleverly correct.
 
 ## KNOWN LIMITATIONS (V1)
 

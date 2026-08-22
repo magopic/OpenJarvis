@@ -114,6 +114,7 @@ if not _DATA_BOUNDARY_BOOTSTRAP:
     from openjarvis.cli.quickstart_cmd import quickstart
     from openjarvis.cli.registry_cmd import registry
     from openjarvis.cli.scheduler_cmd import scheduler
+    from openjarvis.cli.second_brain_cmd import second_brain_group
     from openjarvis.cli.self_update_cmd import self_update
     from openjarvis.cli.serve import serve
     from openjarvis.cli.skill_cmd import skill
@@ -135,6 +136,7 @@ if not _DATA_BOUNDARY_BOOTSTRAP:
     cli.add_command(channel, "channel")
     cli.add_command(channels, "channels")
     cli.add_command(scheduler, "scheduler")
+    cli.add_command(second_brain_group, "second-brain")
     cli.add_command(doctor, "doctor")
     cli.add_command(agent, "agents")
     cli.add_command(workflow, "workflow")
