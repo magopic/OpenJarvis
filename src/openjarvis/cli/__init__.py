@@ -100,6 +100,7 @@ if not _DATA_BOUNDARY_BOOTSTRAP:
     from openjarvis.cli.daemon_cmd import restart, start, status, stop
     from openjarvis.cli.digest_cmd import digest
     from openjarvis.cli.doctor_cmd import doctor
+    from openjarvis.cli.document_cmd import document_group
     from openjarvis.cli.eval_cmd import eval_group
     from openjarvis.cli.feedback_cmd import feedback_group
     from openjarvis.cli.gateway_cmd import gateway
@@ -137,6 +138,7 @@ if not _DATA_BOUNDARY_BOOTSTRAP:
     cli.add_command(channels, "channels")
     cli.add_command(scheduler, "scheduler")
     cli.add_command(second_brain_group, "second-brain")
+    cli.add_command(document_group, "document")
     cli.add_command(doctor, "doctor")
     cli.add_command(agent, "agents")
     cli.add_command(workflow, "workflow")
