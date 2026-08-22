@@ -558,6 +558,36 @@ class SecondBrainService:
             status=_coerce_enum(status, RelationshipStatus, "status") if status else None,
         )
 
+    def is_outcome_backed(self, entry_id: str) -> bool:
+        """FASE 4N.3 STEP 2: "no outcome, no certified LEARNED lesson."
+
+        Entry-creation validation (frozen, FASE 4N.1) already requires a
+        LESSON/LEARNED entry to be grounded in *something* concrete at
+        write time (domains/entities/evidence_references), since the
+        entry doesn't have an id yet to link an OUTCOME relationship to.
+        This is the second half of that governance, checked at
+        *retrieval* time instead: does this entry now have at least one
+        CONFIRMED relationship connecting it to an entry of type
+        OUTCOME? A LESSON lacking this is not "wrong" -- it may simply
+        not have been linked yet -- but callers (tools, retrieval
+        composition) should present it as unverified-by-outcome rather
+        than silently treating it as equally certain as one that is.
+        Computed, not stored -- becomes true the moment a CONFIRMED link
+        to an OUTCOME exists, with no separate migration or mutation.
+        """
+        for rel in self._store.get_relationships(entry_id, direction="both"):
+            if rel.status is not RelationshipStatus.CONFIRMED:
+                continue
+            other_id = (
+                rel.target_entry_id
+                if rel.source_entry_id == entry_id
+                else rel.source_entry_id
+            )
+            other = self._store.get_entry(other_id)
+            if other is not None and other.type is EntryType.OUTCOME:
+                return True
+        return False
+
     def update_relationship_status(
         self,
         relationship_id: str,

@@ -1,11 +1,13 @@
 # MAIA Second Brain V1 — Storage/Domain Foundation + Governed Tools
 
-Status: FASE 4N.2A — storage foundation (4N.1) plus 6 governed
-model-callable tools, the two-step propose/confirm capture workflow
-(4N.2), and stable runtime-resolved identity binding (4N.2A),
-implemented and tested (34/34). No Obsidian sync. No RAG/embeddings. No
-graph reasoning. No proactive/autonomous memory writes — every write
-still requires an explicit, separate human confirmation.
+Status: FASE 4N.3 — storage foundation (4N.1), 6 governed model-callable
+tools and the two-step propose/confirm capture workflow (4N.2), stable
+runtime-resolved identity binding (4N.2A), and a certified full
+operational experience cycle (4N.3: PROBLEM → HYPOTHESIS → DECISION →
+ACTION → OUTCOME → LESSON → future retrieval), implemented and tested
+(37/37). No Obsidian sync. No RAG/embeddings. No graph reasoning. No
+proactive/autonomous memory writes — every write still requires an
+explicit, separate human confirmation.
 
 ## PURPOSE
 
@@ -189,6 +191,18 @@ V1 is exact retrieval only, three axes:
 only. No semantic similarity, no embeddings, no multi-hop graph
 reasoning — all explicitly deferred, per this phase's scope.
 
+**FASE 4N.3**: multi-hop traversal is still not implemented in
+`SecondBrainService`/`SecondBrainStore` (that constraint is unchanged),
+but a model can now walk a chain of direct-neighbor hops itself: every
+`second_brain_search`/`second_brain_get` result renders each
+relationship's actual `related_entry_id` (not just a status count) into
+the text the model reads, so it can call `second_brain_get` again on
+that id, one hop at a time, for as many hops as the chain has. This is
+still "no graph reasoning" in the sense the phrase was scoped —
+nothing here computes a path, ranks routes, or reasons over the graph
+structure itself; it only makes each already-existing direct edge
+visible enough for a model to choose to follow it.
+
 ## MODEL INDEPENDENCE
 
 `SecondBrainService` is the only supported entry point; `store.py` has
@@ -342,6 +356,206 @@ touched, only its `superseded_by` pointer is set, and a `CONFIRMED`
 separate "correction" tool; correcting is just confirming a new
 proposal while naming what it replaces.
 
+**FASE 4N.3 STEP 11, live-verified in isolated storage**
+(`test_lesson_correction_preserves_history`): a previously stored
+LESSON later proven incomplete is superseded exactly this way — the
+original entry's title/summary remain byte-identical after correction,
+`superseded_by` points at the replacement, the `SUPERSEDES` relationship
+is `CONFIRMED`, the old version stays independently fetchable by its
+own id, and `verify_audit_chain()` still reports valid afterward. A
+caller wanting the *current* answer follows `superseded_by`; a caller
+wanting the *history* can still fetch the original directly — both
+paths stay open, nothing is hidden.
+
+## EXPERIENCE CYCLE (FASE 4N.3)
+
+The full operational learning loop:
+
+```
+PROBLEM
+  │ (evidence references, RELATED_TO)
+  ▼
+HYPOTHESIS  ── user verifies/rejects, never automatic ──▶ (stays HYPOTHESIS until a human acts)
+  │ DECIDED_IN
+  ▼
+DECISION  (requires timestamp + provenance — FASE 4N.1, unchanged)
+  │ RESULTED_IN
+  ▼
+ACTION
+  │ RESULTED_IN
+  ▼
+OUTCOME
+  │ RESULTED_IN (CONFIRMED required)
+  ▼
+LESSON  (LEARNED only if outcome_backed — see LESSON GOVERNANCE)
+```
+
+**STEP 1's audit confirmed no schema change was needed anywhere in this
+cycle.** `EntryType` already had all six stages (`PROBLEM`,
+`HYPOTHESIS`, `DECISION`, `ACTION`, `OUTCOME`, `LESSON`) and
+`RelationshipType` already had every relationship the cycle needs
+(`CAUSES`, `RELATED_TO`, `DECIDED_IN`, `RESULTED_IN`, `RESOLVED_BY`,
+`AFFECTS`, `PRECEDES`, `SIMILAR_TO`) since FASE 4N.1 — verified by a
+direct set-membership check before writing any code. The entire cycle
+is built from primitives the frozen foundation already had; FASE 4N.3
+only had to prove they compose, and close one real gap in how the
+*tool layer* (not the schema) surfaced relationships (see below).
+
+Isolated, deterministic test coverage:
+`test_full_experience_chain_persists_correctly` persists all six
+stages through the governed tool layer, confirms every entry keeps its
+own provenance and trust-lifecycle status (nothing silently changes
+stage), confirms the relationship chain is walkable end-to-end, confirms
+none of the six entries has `superseded_by` set (no history was
+overwritten), and confirms `verify_audit_chain()` reports valid.
+
+**Live-verified** (Claude Sonnet 4.6 + Orchestrator, real `jarvis ask`):
+given a single search hit, the model made 5 further `second_brain_get`
+calls — one per hop — correctly walking PROBLEM → HYPOTHESIS → DECISION
+→ ACTION → OUTCOME using nothing but each entry's `related_entry_id`,
+and correctly reconstructed the full chain in its answer with the
+correct ids, without inventing any step.
+
+## LESSON GOVERNANCE
+
+"No outcome, no certified LEARNED lesson" is enforced in two layers
+that answer two different questions:
+
+1. **At write time** (FASE 4N.1, unchanged): `create_entry`/
+   `propose_entry` require a LESSON/LEARNED entry to be grounded in
+   something concrete (`domains`/`entities`/`evidence_references`) —
+   enforced then because the entry doesn't have an id yet to link an
+   OUTCOME relationship to (chicken-and-egg).
+2. **At retrieval time** (FASE 4N.3, new): `SecondBrainService.is_outcome_backed(entry_id)`
+   checks whether the entry now has at least one `CONFIRMED`
+   relationship connecting it to an entry of type `OUTCOME`. This is
+   computed on every read, never stored — it becomes `True` the moment
+   a human confirms the right link, with no migration or mutation of
+   the entry itself required.
+
+The tool layer surfaces this as `outcome_backed` on every LESSON (or
+`LEARNED`-status entry) `second_brain_search`/`second_brain_get`
+returns, **in the rendered text the model actually reads** — not
+buried in metadata the model never sees. This matters structurally:
+the orchestrator's tool-calling loop only threads `ToolResult.content`
+back into the conversation (`Message(role=Role.TOOL, content=...)`);
+`ToolResult.metadata` never reaches the model at all. FASE 4N.3 found
+`_entry_summary()` computed rich relationship/outcome-backing data but
+put it only in `metadata` — structurally invisible to the model despite
+being computed correctly. Fixed by rendering the same data into
+`content` via `_render_entry_text()` (`tools/second_brain_tools.py`),
+which is also what makes chain-walking possible: each relationship's
+`related_entry_id` appears in the text a model reads, giving it
+something to call `second_brain_get` on. An unbacked lesson is explicitly labeled
+"not linked to any CONFIRMED OUTCOME -- treat as unverified," so a
+model presenting it has no way to accidentally treat it as equally
+certain as one that is backed.
+
+Live-verified: in the isolated test, a LESSON linked to its OUTCOME via
+a still-`PROPOSED` relationship correctly reports `outcome_backed=False`;
+the same LESSON reports `outcome_backed=True` only after a human
+explicitly confirms that relationship.
+
+## HISTORICAL EVIDENCE / CURRENT VS. HISTORICAL FACTS
+
+A new prompt section, `_HISTORICAL_EVIDENCE_RULE` (`prompt/builder.py`,
+always included, as generic and business-agnostic as the existing
+`_TOOL_GROUNDING_RULE` it sits beside — see FASE 4M.5A), makes the
+distinction explicit: a Second Brain result is real evidence about a
+PAST case, never proof of the CURRENT one. Correct: *"In a previous
+case, X was associated with the problem, and action Y produced outcome
+Z."* Incorrect: *"The current problem is definitely X."* A past case
+may suggest what to investigate; only a tool result describing the
+CURRENT situation can certify a current cause, status, or outcome.
+
+**Deliberately not implemented as an extension of `OperationalEvidence`.**
+`OperationalEvidence`/`build_evidence()` (`agents/operational_evidence.py`,
+frozen since FASE 4M.5B) is scoped specifically to OPS Bridge capability
+results (FACT/KNOWLEDGE per capability) and stays that way — mixing
+Second Brain's fundamentally different kind of evidence (organizational
+memory of past cases, not live operational state) into the same
+classifier would conflate two distinct grounding models for no real
+gain. The tool name alone already distinguishes them
+(`ops_dynamic_*` vs `second_brain_*`), and the new prompt rule
+generalizes the distinction — that combination was sufficient in every
+test; extending `OperationalEvidence` was evaluated and rejected as
+unnecessary scope growth into a system FASE 4M.5B already certified.
+
+Live-verified (STEP 10, `jarvis ask`, one turn): asked for a current
+OPS fact (production OEE) and a historical Second Brain search in the
+same message, the model retrieved and reported both, correctly kept
+them in separate sections of its answer, and drew no causal or
+comparative link between them since the historical search happened to
+return nothing that turn — no fabricated connection was invented to
+fill the gap. (This run also surfaced a real, minor limitation: the
+Second Brain free-text query was phrased in Italian while the seeded
+test content was in English, and FTS5 found no match on wording alone —
+see KNOWN LIMITATIONS.)
+
+## SIMILAR CASE RETRIEVAL (no embeddings)
+
+V1 similarity is **structural overlap only** — the same `domain`/
+`entity`/`type` filters `second_brain_search`/`list_entries` already
+had (FASE 4N.1/4N.2), used as the similarity mechanism itself rather
+than a new scoring layer. No vector index, no computed percentage: the
+tool's description explicitly instructs "state which domains/entities/
+terms two cases share -- never invent or imply a numeric similarity
+score unless a tool result actually computed and returned one," and no
+tool in this codebase does.
+
+Live-verified: asked whether a new problem "resembled" a past one, the
+model's answer named the exact shared basis — *"Condivide il dominio
+`test-domain` e la tipologia di problema... nessun punteggio numerico è
+stato calcolato"* — matching the required output shape (matched
+domain, matched entry type, no invented score) without any dedicated
+"similar case" tool or field existing at all; the existing filters
+were sufficient.
+
+**One live-observed limitation, addressed by tool-description wording,
+not a code change**: an entity-only search for a *new* entity
+correctly finds nothing (that exact entity was never recorded before) —
+but a model that stops there without also trying a broader domain-level
+search will report "no similar case" even when one exists under a
+different entity name. The tool description was strengthened to
+instruct trying a broader search before concluding nothing similar
+exists. Live testing after that change showed mixed results: a direct,
+simply-phrased request to search by domain worked reliably and
+correctly retrieved and walked the full historical chain; a single
+complex message bundling many sub-questions at once sometimes did not
+trigger the broader search despite the instruction. This is reported
+as an honest, live-observed model-behavior characteristic — not a
+defect in the retrieval mechanism itself, which was independently
+confirmed correct by direct, non-model tool invocation in every case.
+
+## ANTI-CAUSALITY RULES
+
+Folded into the same `_HISTORICAL_EVIDENCE_RULE` prompt section (one
+rule, not a separate mechanism, since both address the same underlying
+"don't let historical/correlational evidence pose as current/causal
+evidence" failure mode):
+
+- A `SIMILAR_TO`/`CORRELATES_WITH` relationship is never restated as
+  `CAUSES`.
+- A past decision/action that produced a good outcome is context for a
+  recommendation, not a recommendation by itself — the current
+  situation still needs its own current evidence first.
+- Two records being related or co-occurring in the past does not mean
+  one caused the other.
+
+No domain-specific wording (no "OEE," no "production line," no
+hardcoded example) — correct and inert in any session, including one
+with no Second Brain or OPS tools connected at all.
+
+Live-verified (STEP 8/9): asked "quindi la causa è la stessa?" after a
+strong historical domain-and-type match was found and fully walked,
+the model refused to certify the current cause, explained precisely
+why (the historical hypothesis itself was never certified as a
+verified cause; domain similarity across two different assets is not
+proof of a shared cause; no current evidence had been gathered for the
+new case at all), and reframed the historical lesson as *"un'ipotesi da
+testare, non una certezza"* — a starting point for investigation, not
+an automatic conclusion or an automatically-recommended repeat action.
+
 
 ## FUTURE OBSIDIAN BOUNDARY (not implemented here)
 
@@ -367,6 +581,26 @@ changes through.
 
 ## KNOWN LIMITATIONS (V1)
 
+- **Cross-language free-text search is not guaranteed to match**
+  (found live in FASE 4N.3 STEP 10): FTS5 matches on the tokenized
+  words actually stored, not meaning — an Italian query against
+  English-language stored content (or vice versa) can miss a real
+  match that a domain/entity/type filter would still find. Not a bug —
+  FTS5 has no translation layer, and none was ever claimed — but worth
+  knowing when composing a search: prefer structured filters
+  (`domain`/`entity`/`type`) over free text alone when language might
+  differ between the query and the stored content.
+- **Broader-search fallback is a prompted behavior, not a guarantee**
+  (found live in FASE 4N.3 STEP 8/9): when an entity-specific search
+  correctly finds nothing, the tool description instructs trying a
+  broader domain-level search before concluding nothing similar
+  exists. Live testing showed this works reliably for a simple, direct
+  request, but not with complete reliability inside one long message
+  bundling many sub-questions at once. The retrieval mechanism itself
+  was independently confirmed correct in every case (direct
+  non-model tool invocation always found the right entries); this is a
+  live-observed model-behavior characteristic under complex prompts,
+  not a defect in `SecondBrainService`/`SecondBrainStore`.
 - **RESOLVED in FASE 4N.2A** (was the top limitation as of 4N.2): the
   cross-invocation identity gap is fixed at the runtime/tool boundary
   — see AUTHORIZATION above. What remains is a narrower, explicitly

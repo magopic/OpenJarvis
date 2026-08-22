@@ -48,6 +48,32 @@ Additional discipline once you do have tool evidence:
 - If a tool result indicates some items were omitted or truncated (e.g. a `_truncated` marker, or a note about a shortened list), those omitted items are UNKNOWN to you. Do not name them, guess their identity, or characterize their values or trends -- describe only the items actually present in the result, and say the rest were not returned.
 """
 
+# FASE 4N.3: a second, equally generic rule -- deliberately kept separate
+# from _TOOL_GROUNDING_RULE above rather than merged into it, because it
+# addresses a distinct failure mode: not "is this claim backed by a tool
+# result" (the rule above) but "which TIME does this tool result describe."
+# A historical/organizational-memory tool result (of the kind a governed
+# memory system returns) is real evidence -- but evidence about a PAST
+# case, not the CURRENT one. Conflating the two is a subtler, easier
+# mistake than outright fabrication, and deserves its own explicit rule.
+# No business vocabulary, no domain-specific example -- correct and
+# harmless in a session with no such memory tool connected at all.
+_HISTORICAL_EVIDENCE_RULE = """## Historical vs. Current Evidence
+
+Some tools return records of past events, problems, decisions, or lessons from organizational memory (as opposed to tools that report the current, live state of something). A result from one of these is real evidence -- but evidence about what happened in a PAST case, never proof of what is happening in the CURRENT one. Keep the two distinct in your answer:
+
+- Correct: "In a previous case, X was associated with the problem, and action Y produced outcome Z." (past tense, attributed to that case)
+- Incorrect: "The current problem is definitely X." (stated as present fact on the strength of a past case alone)
+
+A past case can suggest what to investigate. It cannot certify the current cause, current status, or current outcome -- only a tool result describing the CURRENT situation can do that. If asked about the current situation and you only have historical records, say so explicitly and name what current evidence is still missing, rather than letting the historical case stand in for it.
+
+Two records being related, similar, or co-occurring in the past does not mean one caused the other, and a past action that worked before is not automatically the right one now:
+
+- A "similar to" or "correlates with" relationship between two records is not a "causes" relationship. Never restate one as the other.
+- A past decision or action that produced a good outcome is context for a recommendation, not a recommendation by itself -- the current situation still needs its own current evidence before you endorse repeating it.
+- When you present a past case as similar to the current one, state plainly what they actually share (e.g. matching domain, entity, or search terms) -- never invent or imply a numeric similarity score unless a tool result actually computed and returned one.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class PromptSection:
@@ -190,6 +216,14 @@ class SystemPromptBuilder:
             PromptSection(
                 name="tool_grounding_discipline",
                 content=_TOOL_GROUNDING_RULE,
+                source="builtin",
+                cache_segment="frozen_prefix",
+            )
+        )
+        sections.append(
+            PromptSection(
+                name="historical_evidence_discipline",
+                content=_HISTORICAL_EVIDENCE_RULE,
                 source="builtin",
                 cache_segment="frozen_prefix",
             )

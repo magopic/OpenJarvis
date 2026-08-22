@@ -116,7 +116,12 @@ def test_char_limit_truncation(memory_dir: Path):
         system_prompt_config=SystemPromptConfig(soul_max_chars=100),
     )
     prompt = builder.build()
-    assert prompt.count("x") <= 100
+    # Count "x" only within the SOUL section's own rendered content, not
+    # the whole prompt -- other builtin sections (grounding/discipline
+    # rules) are free to contain the letter "x" in ordinary prose
+    # without that being a truncation-logic regression.
+    soul_section = next(s for s in builder.sections() if s.name == "soul")
+    assert soul_section.content.count("x") <= 100
     assert "truncated" in prompt.lower()
 
 
@@ -175,14 +180,16 @@ def test_sections_expose_prompt_metadata(memory_dir: Path):
 
     assert [section.name for section in sections] == [
         "agent_template",
+        "tool_grounding_discipline",
+        "historical_evidence_discipline",
         "soul",
         "memory",
         "user",
         "session_context",
         "previous_state",
     ]
-    assert sections[1].source == str(memory_dir / "SOUL.md")
-    assert sections[1].cache_segment == "frozen_prefix"
+    assert sections[3].source == str(memory_dir / "SOUL.md")
+    assert sections[3].cache_segment == "frozen_prefix"
     assert sections[-1].cache_segment == "dynamic_suffix"
     assert builder.build() == "\n\n".join(section.content for section in sections)
 

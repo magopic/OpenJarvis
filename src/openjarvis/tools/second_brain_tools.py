@@ -36,7 +36,7 @@ from openjarvis.core.types import ToolResult
 from openjarvis.second_brain.errors import SecondBrainValidationError
 from openjarvis.second_brain.identity import resolve_runtime_principal
 from openjarvis.second_brain.service import SecondBrainService
-from openjarvis.second_brain.types import EvidenceReference, SecondBrainEntry
+from openjarvis.second_brain.types import EntryType, EvidenceReference, SecondBrainEntry
 from openjarvis.tools._stubs import BaseTool, ToolSpec
 
 _ENTRY_TYPES = [
@@ -84,11 +84,31 @@ def _parse_evidence_refs(raw: Optional[List[Dict[str, Any]]]) -> List[EvidenceRe
 def _entry_summary(
     service: SecondBrainService, entry: SecondBrainEntry, *, actor: Optional[str]
 ) -> Dict[str, Any]:
+    """FASE 4N.3 STEP 3: relationships are returned with the actual
+    neighbor entry id, not just a status count. Without this, a model
+    could see "this PROBLEM has 1 CONFIRMED relationship" but had no
+    way to learn *which entry* that pointed to -- meaning it could
+    never walk a PROBLEM -> HYPOTHESIS -> DECISION -> ACTION -> OUTCOME
+    -> LESSON chain using only second_brain_search/second_brain_get.
+    This is a tool-output enrichment only (get_relationships() already
+    returned full Relationship objects at the service layer) -- no
+    schema change, reusing the frozen relationships table as-is.
+    """
     rels = service.get_relationships(entry.id, direction="both")
-    rel_summary = {}
+    relationships = []
     for rel in rels:
-        rel_summary[rel.status.value] = rel_summary.get(rel.status.value, 0) + 1
-    return {
+        is_outgoing = rel.source_entry_id == entry.id
+        related_id = rel.target_entry_id if is_outgoing else rel.source_entry_id
+        relationships.append(
+            {
+                "relationship_id": rel.id,
+                "relation_type": rel.relation_type.value,
+                "status": rel.status.value,
+                "direction": "outgoing" if is_outgoing else "incoming",
+                "related_entry_id": related_id,
+            }
+        )
+    result = {
         "id": entry.id,
         "type": entry.type.value,
         "title": entry.title,
@@ -98,14 +118,50 @@ def _entry_summary(
         "domains": entry.domains,
         "entities": entry.entities,
         "visibility": entry.visibility.value,
-        "relationships_summary": (
-            ", ".join(f"{count} {status}" for status, count in rel_summary.items())
-            if rel_summary
-            else "none"
-        ),
+        "relationships": relationships,
         "archived": entry.archived_at is not None,
         "superseded_by": entry.superseded_by,
     }
+    if entry.type is EntryType.LESSON or entry.trust_status.value == "LEARNED":
+        result["outcome_backed"] = service.is_outcome_backed(entry.id)
+    return result
+
+
+def _render_entry_text(s: Dict[str, Any]) -> str:
+    """Render an entry summary as text for ToolResult.content.
+
+    FASE 4N.3: this -- not the ``metadata`` dict -- is what actually
+    reaches the model. The orchestrator's tool-calling loop only
+    threads ``ToolResult.content`` back into the conversation
+    (``orchestrator.py``'s ``Message(role=Role.TOOL, content=...)``);
+    ``metadata`` never does. Relationship/outcome-backing data placed
+    only in ``metadata`` would be structurally invisible to the model,
+    silently defeating experience-chain traversal -- so every field a
+    model needs to walk PROBLEM -> HYPOTHESIS -> ... -> LESSON, or to
+    tell an outcome-backed lesson from an unlinked one, is rendered
+    into this string.
+    """
+    lines = [f"[{s['id']}] ({s['type']}, trust={s['trust_status']}) {s['title']} -- {s['summary']}"]
+    if s.get("domains") or s.get("entities"):
+        lines.append(f"  domains={s.get('domains') or []} entities={s.get('entities') or []}")
+    if "outcome_backed" in s:
+        lines.append(
+            f"  outcome_backed={s['outcome_backed']}"
+            + ("" if s["outcome_backed"] else " (not linked to any CONFIRMED OUTCOME -- treat as unverified)")
+        )
+    if s["relationships"]:
+        rel_lines = [
+            f"    {r['direction']} {r['relation_type']} ({r['status']}) -> {r['related_entry_id']}"
+            for r in s["relationships"]
+        ]
+        lines.append("  relationships:\n" + "\n".join(rel_lines))
+    else:
+        lines.append("  relationships: none")
+    if s.get("archived"):
+        lines.append("  [ARCHIVED]")
+    if s.get("superseded_by"):
+        lines.append(f"  superseded_by={s['superseded_by']} (a newer version exists -- prefer it)")
+    return "\n".join(lines)
 
 
 @ToolRegistry.register("second_brain_search")
@@ -123,14 +179,32 @@ class SecondBrainSearchTool(BaseTool):
         return ToolSpec(
             name="second_brain_search",
             description=(
-                "Search MAIA's Second Brain (governed business memory: past events, "
-                "problems, hypotheses, decisions, outcomes, lessons) -- NOT OPS ONE "
-                "KPI data (use the ops_dynamic_* tools for that) and NOT free-text "
-                "conversation memory (memory_search). Combine free-text 'query' with "
-                "any filters. Returns confirmed entries only -- proposals awaiting "
-                "confirmation never appear here. PRIVATE entries not belonging to the "
-                "caller running this tool are silently excluded -- there is no "
-                "parameter to search as a different identity."
+                "Search MAIA's Second Brain (governed HISTORICAL organizational "
+                "memory: past events, problems, hypotheses, decisions, outcomes, "
+                "lessons) -- NOT OPS ONE KPI data (use the ops_dynamic_* tools for "
+                "current facts) and NOT free-text conversation memory "
+                "(memory_search). A result here describes what happened in a PAST "
+                "case, never the current situation -- do not restate it as a "
+                "current fact. Each result lists its 'relationships' with the "
+                "related entry's id; call second_brain_get on that id to walk a "
+                "chain (e.g. PROBLEM -> HYPOTHESIS -> DECISION -> ACTION -> "
+                "OUTCOME -> LESSON) one hop at a time. A LESSON also reports "
+                "'outcome_backed' -- only true if a CONFIRMED relationship links it "
+                "to an OUTCOME; an unbacked lesson is unverified, say so. "
+                "Combine free-text 'query' with any filters -- shared domain/entity "
+                "overlap with the current situation is the explicit basis for "
+                "calling two cases 'similar,' never a computed percentage. When "
+                "looking for a similar PAST case (not the exact same one), searching "
+                "by the current entity alone will correctly find nothing if that "
+                "exact entity was never recorded before -- also try a broader search "
+                "(by domain, or by entry type, or by a shared term) before concluding "
+                "nothing similar exists; report an honest 'not found' only after that "
+                "broader search also comes up empty. "
+                "SIMILAR_TO/CORRELATES_WITH relationships never mean CAUSES. "
+                "Returns confirmed entries only -- proposals awaiting confirmation "
+                "never appear here. PRIVATE entries not belonging to the caller "
+                "running this tool are silently excluded -- there is no parameter "
+                "to search as a different identity."
             ),
             parameters={
                 "type": "object",
@@ -203,10 +277,7 @@ class SecondBrainSearchTool(BaseTool):
         return ToolResult(
             tool_name="second_brain_search",
             success=True,
-            content="\n".join(
-                f"[{s['id']}] ({s['type']}, trust={s['trust_status']}) {s['title']} -- {s['summary']}"
-                for s in summaries
-            ),
+            content="\n".join(_render_entry_text(s) for s in summaries),
             metadata={"num_results": len(summaries), "entries": summaries},
         )
 
@@ -224,8 +295,12 @@ class SecondBrainGetTool(BaseTool):
         return ToolSpec(
             name="second_brain_get",
             description=(
-                "Fetch one Second Brain entry by id. Denied if it is PRIVATE to "
-                "someone other than the caller running this tool."
+                "Fetch one Second Brain entry by id -- HISTORICAL organizational "
+                "memory, never the current situation. Use this to follow a "
+                "'related_entry_id' from a second_brain_search result one hop at "
+                "a time (e.g. from a PROBLEM to its linked DECISION or OUTCOME). "
+                "Denied if it is PRIVATE to someone other than the caller running "
+                "this tool."
             ),
             parameters={
                 "type": "object",
@@ -252,7 +327,7 @@ class SecondBrainGetTool(BaseTool):
         return ToolResult(
             tool_name="second_brain_get",
             success=True,
-            content=f"[{summary['id']}] ({summary['type']}) {summary['title']}: {summary['summary']}",
+            content=_render_entry_text(summary),
             metadata=summary,
         )
 

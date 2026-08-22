@@ -223,8 +223,8 @@ def test_f_relationship_aware_no_invented_solution(tools):
     ).metadata["entry_id"]
 
     # No resolution linked yet.
-    rels_before = tools["get"].execute(entry_id=problem_id).metadata["relationships_summary"]
-    assert rels_before == "none"
+    rels_before = tools["get"].execute(entry_id=problem_id).metadata["relationships"]
+    assert rels_before == []
 
     outcome_propose = tools["propose"].execute(
         type="OUTCOME", title="Fermo risolto", summary="Risolto sostituendo il cambio formato.",
@@ -242,8 +242,11 @@ def test_f_relationship_aware_no_invented_solution(tools):
     assert link_result.success
     assert link_result.metadata["status"] == "PROPOSED"  # not auto-confirmed
 
-    rels_after = tools["get"].execute(entry_id=problem_id).metadata["relationships_summary"]
-    assert "PROPOSED" in rels_after
+    rels_after = tools["get"].execute(entry_id=problem_id).metadata["relationships"]
+    assert len(rels_after) == 1
+    assert rels_after[0]["status"] == "PROPOSED"
+    assert rels_after[0]["related_entry_id"] == outcome_id
+    assert rels_after[0]["relation_type"] == "RESOLVED_BY"
 
 
 # -- G: no match, honest refusal -----------------------------------------
