@@ -92,6 +92,10 @@ try:
 except ImportError:
     pass
 try:
+    import openjarvis.tools.proactive_insight_tools  # noqa: F401
+except ImportError:
+    pass
+try:
     import openjarvis.tools.user_profile_manage  # noqa: F401
 except ImportError:
     pass

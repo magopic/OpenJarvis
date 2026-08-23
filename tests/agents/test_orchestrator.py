@@ -192,8 +192,13 @@ class TestOrchestratorAgent:
         agent.run("Hi", context=ctx)
         call_args = engine.generate.call_args
         messages = call_args[0][0]
-        assert len(messages) == 2
+        # FASE 4P.1A/4P.1B: three always-present turn-0 notes are now
+        # appended before the first generate() call -- the claim-boundary
+        # notice, the available-tools manifest, and the tool-execution
+        # integrity note. See proactive_insight.py.
+        assert len(messages) == 5
         assert messages[0].role == Role.SYSTEM
+        assert "[ACTUALLY_EXECUTED_TOOLS]" in messages[4].content
 
     def test_tools_passed_to_engine(self):
         engine = _make_engine_no_tools()

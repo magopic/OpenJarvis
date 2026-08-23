@@ -34,6 +34,21 @@ _DOCUMENT_KNOWLEDGE_TOOL_IDS = (
     "document_list_sources",
 )
 
+# FASE 4P.1: Proactive Insight tools are safe to auto-enable for the same
+# reason -- every governance rule they touch is enforced inside the
+# services they call (OPS Bridge governance, Second Brain visibility,
+# Document Knowledge workspace confinement); this module adds no new
+# authorization surface of its own, and exposes read/detect-only tools,
+# never an execution tool. Mirrors the Second Brain/Document Knowledge
+# pattern exactly so a default MAIA session can actually reach them.
+_PROACTIVE_INSIGHT_TOOL_IDS = (
+    "maia_analyze_evidence_for_insights",
+    "maia_insights_list",
+    "maia_insight_get",
+    "maia_action_proposals_list",
+    "maia_action_proposal_get",
+)
+
 
 def _normalize_tool_names(value: Any) -> list[str]:
     """Normalize configured tool names from string or list-like values."""
@@ -94,5 +109,9 @@ def resolve_tool_names(
     for dk_id in _DOCUMENT_KNOWLEDGE_TOOL_IDS:
         if dk_id not in names:
             names.append(dk_id)
+
+    for pi_id in _PROACTIVE_INSIGHT_TOOL_IDS:
+        if pi_id not in names:
+            names.append(pi_id)
 
     return names

@@ -14,14 +14,25 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import logging
 import re
 from typing import Any, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from openjarvis.agents._stubs import AgentContext, AgentResult, ToolUsingAgent
 from openjarvis.agents.operational_evidence import (
     _DOCUMENT_KNOWLEDGE_TOOL_NAMES,
     _SECOND_BRAIN_TOOL_NAMES,
     build_evidence,
+)
+from openjarvis.agents.proactive_insight import (
+    ProactiveReasoningService,
+    render_available_tools_manifest,
+    render_claim_boundary_notice,
+    render_governed_proactive_block,
+    render_tool_execution_integrity,
+    should_activate_proactive_analysis,
 )
 from openjarvis.core.events import EventBus
 from openjarvis.core.registry import AgentRegistry
@@ -335,6 +346,29 @@ class OrchestratorAgent(ToolUsingAgent):
             system_prompt=self._system_prompt,
         )
 
+        # FASE 4P.1A STEP 5 / FASE 4P.1B: tool-claim integrity, present
+        # from turn 1 -- before any tool has run. Live testing in FASE
+        # 4P.1/4P.1A found the model can fabricate a fake tool-call
+        # transcript (including a fully invented dataset and a false
+        # trust_status claim) in its own prose on the very first turn, and
+        # that the integrity block alone did not reliably prevent this
+        # when asked about a capability that is not actually registered.
+        # FASE 4P.1B adds two more turn-0 blocks: a closed-world list of
+        # what tools genuinely exist this session (so the model can look
+        # up availability instead of guessing), and an explicit narrative/
+        # governed-claims boundary (STEP 2/4) -- still a context-based
+        # deterrent, not a hard guarantee; see docs/
+        # MAIA_PROACTIVE_INSIGHT_V1.md's KNOWN LIMITATIONS for the honest
+        # statement of what this does and does not close.
+        messages.append(Message(role=Role.USER, content=render_claim_boundary_notice()))
+        messages.append(
+            Message(
+                role=Role.USER,
+                content=render_available_tools_manifest([t.spec.name for t in self._tools]),
+            )
+        )
+        messages.append(Message(role=Role.USER, content=render_tool_execution_integrity([])))
+
         # Get OpenAI-format tool definitions. FASE 4L.2C: route the OPS
         # Bridge dynamic tool subset per-turn instead of serializing every
         # enabled tool's schema unconditionally -- see tool_router.py. Only
@@ -562,8 +596,46 @@ class OrchestratorAgent(ToolUsingAgent):
             # something the human said, so no rewording was needed -- this
             # mirrors the identical fix already used for the same
             # constraint in engine/_openai_compat.py's finalization retry.
-            evidence_note = build_evidence(all_tool_results).render_note()
+            evidence = build_evidence(all_tool_results)
+            evidence_note = evidence.render_note()
             messages.append(Message(role=Role.USER, content=evidence_note))
+
+            # FASE 4P.1A STEP 2/4: the deterministic proactive-insight
+            # engine runs here, in the orchestrator, NOT because the model
+            # chose to call maia_analyze_evidence_for_insights -- it runs
+            # whenever activation is structurally warranted (see
+            # should_activate_proactive_analysis: explicit proactive
+            # intent in the ORIGINAL user request, an explicit call to the
+            # analysis tool this turn, or a certified-alert source),
+            # regardless of which evidence-gathering tools the model
+            # actually used. This is the fix for FASE 4P.1's finding that
+            # Claude reliably preferred its familiar ops_dynamic_*/
+            # second_brain_*/document_* tools over ever calling the new
+            # analysis tool itself -- the model no longer needs to choose
+            # it for the governed result to reach the final answer.
+            # Recomputed fresh every tool-executing turn (cheap,
+            # deterministic, <1ms even at 1000 evidence items -- see
+            # FASE 4P.1's STEP 17 measurement) so it always reflects the
+            # full evidence gathered so far, never a stale snapshot.
+            if should_activate_proactive_analysis(
+                input,
+                all_tool_results,
+                evidence,
+                tool_names_called_this_turn=[tc.name for tc in tool_calls],
+            ):
+                insights = ProactiveReasoningService().analyze(all_tool_results, evidence)
+                logger.debug(
+                    "FASE 4P.1A: proactive analysis activated, %d insight(s): %s",
+                    len(insights),
+                    [i.id for i in insights],
+                )
+                messages.append(
+                    Message(role=Role.USER, content=render_governed_proactive_block(insights))
+                )
+
+            messages.append(
+                Message(role=Role.USER, content=render_tool_execution_integrity(all_tool_results))
+            )
 
         # Max turns exceeded
         final_content = self._strip_think_tags(content) if content else ""
