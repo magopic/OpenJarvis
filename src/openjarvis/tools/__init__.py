@@ -96,6 +96,14 @@ try:
 except ImportError:
     pass
 try:
+    import openjarvis.tools.monitoring_tools  # noqa: F401
+except ImportError:
+    pass
+try:
+    import openjarvis.tools.maia_manage  # noqa: F401
+except ImportError:
+    pass
+try:
     import openjarvis.tools.user_profile_manage  # noqa: F401
 except ImportError:
     pass

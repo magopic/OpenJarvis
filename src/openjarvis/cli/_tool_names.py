@@ -49,6 +49,31 @@ _PROACTIVE_INSIGHT_TOOL_IDS = (
     "maia_action_proposal_get",
 )
 
+# FASE 4P.2: monitor/notification management tools are configuration, not
+# business execution -- creating/enabling a monitor never touches an
+# external system, and a monitor cycle itself only ever reaches the same
+# already-governed sources maia_analyze_evidence_for_insights does (see
+# monitoring/service.py::_collect_evidence). No execution tool exists in
+# this set (mirrors _PROACTIVE_INSIGHT_TOOL_IDS's own boundary exactly).
+_MONITORING_TOOL_IDS = (
+    "maia_monitors_list",
+    "maia_monitor_get",
+    "maia_monitor_create",
+    "maia_monitor_enable",
+    "maia_monitor_disable",
+    "maia_monitor_run_now",
+    "maia_notifications_list",
+    "maia_notification_get",
+    "maia_notification_acknowledge",
+)
+
+# FASE 4P.2A: maia_manage is an ADDITIONAL, consolidated gateway over the
+# same insight/monitor/notification operations above (STEP 6 -- the
+# individual tools are NOT removed, this is offered alongside them). It
+# is a thin router (see tools/maia_manage.py); no new authorization
+# surface, no execution capability.
+_MAIA_MANAGE_TOOL_IDS = ("maia_manage",)
+
 
 def _normalize_tool_names(value: Any) -> list[str]:
     """Normalize configured tool names from string or list-like values."""
@@ -113,5 +138,13 @@ def resolve_tool_names(
     for pi_id in _PROACTIVE_INSIGHT_TOOL_IDS:
         if pi_id not in names:
             names.append(pi_id)
+
+    for mon_id in _MONITORING_TOOL_IDS:
+        if mon_id not in names:
+            names.append(mon_id)
+
+    for mm_id in _MAIA_MANAGE_TOOL_IDS:
+        if mm_id not in names:
+            names.append(mm_id)
 
     return names
