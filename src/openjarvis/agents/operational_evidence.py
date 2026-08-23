@@ -1,19 +1,33 @@
-"""OperationalEvidence -- a lightweight evidence model (FASE 4M.5B).
+"""OperationalEvidence -- a lightweight, multi-source evidence model.
 
-Classifies already-certified data the OPS Bridge tools returned this turn
-into FACT / KNOWLEDGE / LIMITATION, and renders a compact note the
+Originally FASE 4M.5B: classified already-certified OPS Bridge data into
+FACT / KNOWLEDGE / LIMITATION, and rendered a compact note the
 orchestrator injects into the conversation so the model can judge
 sufficiency and comparisons for itself.
 
-This module computes nothing and duplicates no formula. It only reads
-fields the Bridge/capabilities already certified (FASE 4K classifyPeriodStatus,
-FASE 4I capability governance, FASE 4M.4A/4M.4B trust_status/provenance/
-limitations) and reorganizes them for the model to see clearly. It has no
-knowledge of any specific business domain, KPI, or threshold -- "facts",
-"knowledge", "domain", and "sufficiency" here are structural categories
-derived purely from the shape of the Bridge envelope
-({status, data, source, period, period_status, reason, confidence_status}),
-not from any Maffei-specific rule.
+FASE 4O.6 (Multi-Source Reasoning / Evidence Composition V1) extends this
+to also classify Second Brain (historical experience) and Document
+Knowledge (file-sourced) tool results into the same kind of structural,
+cross-turn ledger OPS evidence already got -- so a question spanning
+multiple governed sources gets ONE coherent, re-injected recap instead of
+OPS being the only source with persistent framing. This is additive: the
+OPS classification logic below (FACT/KNOWLEDGE from the Bridge envelope
+shape) is UNCHANGED, byte-for-byte, from before this phase. Nothing here
+computes a new fact, duplicates a formula, or lets one source's data
+masquerade as another's -- every item still traces back to exactly the
+tool result it came from, tagged with which of five source classes it is:
+
+    CURRENT_OPERATIONAL_FACT  -- certified OPS Bridge operational value (was 'fact')
+    KNOWLEDGE_DEFINITION      -- certified OPS Knowledge-capability definition (was 'knowledge')
+    HISTORICAL_EXPERIENCE     -- a Second Brain entry -- a PAST case, never current
+    DOCUMENT_EVIDENCE         -- a Document Knowledge chunk -- contextual, never certified
+    LIMITATION                -- a source explicitly reported a gap (still tagged by origin)
+
+This module has no knowledge of any specific business domain, KPI, or
+threshold -- these are structural categories derived purely from the
+SHAPE of each tool family's own result (the Bridge envelope for OPS;
+Second Brain's entry-summary shape; Document Knowledge's citation shape),
+not from any business-specific rule.
 """
 
 from __future__ import annotations
@@ -24,17 +38,37 @@ from typing import Any, Dict, List, Optional, Set
 from openjarvis.core.types import ToolResult
 from openjarvis.tools.ops_bridge_generic import _compact_for_context
 
-# The one structural marker this module relies on: which dynamic tool is the
-# Knowledge capability, so its results are classified as KNOWLEDGE rather
-# than FACT. Matches ops_bridge_generic.py::_capability_to_tool_id's naming
-# convention ('ops.knowledge.get_kpi_definition' -> tool id ending in this).
+# The one structural marker this module relies on for OPS: which dynamic
+# tool is the Knowledge capability, so its results are classified as
+# KNOWLEDGE_DEFINITION rather than CURRENT_OPERATIONAL_FACT. Matches
+# ops_bridge_generic.py::_capability_to_tool_id's naming convention
+# ('ops.knowledge.get_kpi_definition' -> tool id ending in this).
 _KNOWLEDGE_TOOL_SUFFIX = "knowledge_get_kpi_definition"
 _DYNAMIC_TOOL_PREFIX = "ops_dynamic_"
+
+# FASE 4O.6: the structural markers for the other two source families --
+# tool NAMES, not content shapes, since (unlike OPS) Second Brain and
+# Document Knowledge tools don't share one common envelope; each tool's
+# own metadata shape (asserted, not guessed) is read directly per name.
+_SECOND_BRAIN_TOOL_NAMES = frozenset(
+    {
+        "second_brain_search",
+        "second_brain_get",
+        "second_brain_find_related_experiences",
+    }
+)
+_DOCUMENT_KNOWLEDGE_TOOL_NAMES = frozenset({"document_search"})
+
+SOURCE_CURRENT_OPERATIONAL_FACT = "CURRENT_OPERATIONAL_FACT"
+SOURCE_KNOWLEDGE_DEFINITION = "KNOWLEDGE_DEFINITION"
+SOURCE_HISTORICAL_EXPERIENCE = "HISTORICAL_EXPERIENCE"
+SOURCE_DOCUMENT_EVIDENCE = "DOCUMENT_EVIDENCE"
 
 
 @dataclass
 class EvidenceItem:
-    kind: str  # 'fact' | 'knowledge'
+    kind: str  # 'fact' | 'knowledge' -- kept for internal/back-compat readability
+    source_class: str  # one of the five SOURCE_* constants above -- the authoritative tag
     tool_name: str
     domain: Optional[str]
     period: Optional[str]
@@ -48,6 +82,14 @@ class EvidenceItem:
 class OperationalEvidence:
     facts: List[EvidenceItem] = field(default_factory=list)
     knowledge: List[EvidenceItem] = field(default_factory=list)
+    # FASE 4O.6: two new, separately-tracked lists -- deliberately NOT
+    # merged into `facts`/`knowledge`, so a caller can never accidentally
+    # sum "all evidence" and get a domain-coverage count that silently
+    # includes historical or document-sourced items alongside certified
+    # current facts (`trusted_domains_covered()` below stays scoped to
+    # `facts` exactly as it always was).
+    historical_experience: List[EvidenceItem] = field(default_factory=list)
+    document_evidence: List[EvidenceItem] = field(default_factory=list)
     limitations: List[str] = field(default_factory=list)
     sources: List[Any] = field(default_factory=list)
 
@@ -62,7 +104,7 @@ class OperationalEvidence:
         }
 
     def has_any_evidence(self) -> bool:
-        return bool(self.facts or self.knowledge)
+        return bool(self.facts or self.knowledge or self.historical_experience or self.document_evidence)
 
     def sufficient_for_cross_domain_claim(self, min_domains: int = 2) -> bool:
         """Generic, domain-agnostic coverage check: a claim spanning "the"
@@ -74,12 +116,21 @@ class OperationalEvidence:
 
     def render_note(self) -> str:
         """Compact, structured recap of everything gathered so far this
-        conversation. Purely a reorganization of already-certified fields --
-        no new fact, number, or judgment is introduced here."""
+        conversation, across every governed source class. Purely a
+        reorganization of already-certified/already-retrieved fields --
+        no new fact, number, citation, or judgment is introduced here.
+
+        FASE 4O.6: extended with two new sections (HISTORICAL EXPERIENCE,
+        DOCUMENT EVIDENCE) alongside the original FACTS/KNOWLEDGE -- each
+        under its own header so the model never has to infer which
+        source class an item belongs to, plus one PRECEDENCE line stating
+        the generic (never business-specific) rule for when sources
+        compose or conflict.
+        """
         lines: List[str] = ["[OPERATIONAL EVIDENCE COLLECTED THIS TURN]"]
 
         if self.facts:
-            lines.append("FACTS (from operational capabilities):")
+            lines.append("FACTS -- CURRENT_OPERATIONAL_FACT (certified, from operational capabilities):")
             for item in self.facts:
                 period_bit = f" period={item.period}" if item.period else ""
                 status_bit = f" period_status={item.period_status}" if item.period_status else ""
@@ -91,12 +142,28 @@ class OperationalEvidence:
             lines.append("FACTS: none collected yet.")
 
         if self.knowledge:
-            lines.append("KNOWLEDGE (definitions, from the Knowledge capability):")
+            lines.append("KNOWLEDGE -- KNOWLEDGE_DEFINITION (certified, from the Knowledge capability):")
             for item in self.knowledge:
                 lines.append(
                     f"  - [{item.domain}] trust_status={item.trust_status} "
                     f"provenance={item.provenance}: {item.summary}"
                 )
+
+        if self.historical_experience:
+            lines.append(
+                "HISTORICAL EXPERIENCE -- HISTORICAL_EXPERIENCE (Second Brain, PAST cases -- "
+                "precedent/context only, never the current situation):"
+            )
+            for item in self.historical_experience:
+                lines.append(f"  - [{item.tool_name}] {item.summary}")
+
+        if self.document_evidence:
+            lines.append(
+                "DOCUMENT EVIDENCE -- DOCUMENT_EVIDENCE (contextual/supporting source, "
+                "NEVER a certified operational value even if it contains a number):"
+            )
+            for item in self.document_evidence:
+                lines.append(f"  - [{item.provenance}] {item.summary}")
 
         if self.limitations:
             lines.append("LIMITATIONS reported by the sources above:")
@@ -112,6 +179,18 @@ class OperationalEvidence:
             "say evidence is insufficient rather than generalizing beyond "
             "what these domains actually show."
         )
+
+        if self.knowledge or self.historical_experience or self.document_evidence:
+            lines.append(
+                "PRECEDENCE (generic, not business-specific): a certified FACT above always "
+                "outranks a number merely mentioned in DOCUMENT EVIDENCE or recalled from "
+                "HISTORICAL EXPERIENCE -- if they differ, say so explicitly rather than "
+                "silently picking one. A certified KNOWLEDGE definition always outranks any "
+                "definition implied by document text or general knowledge. HISTORICAL "
+                "EXPERIENCE is precedent, not proof of current cause -- do not state a past "
+                "case caused the current situation without current evidence saying so. "
+                "DOCUMENT EVIDENCE is supporting/contextual, not a substitute for a FACT."
+            )
         return "\n".join(lines)
 
 
@@ -127,15 +206,152 @@ def _domain_from_tool_name(tool_name: str) -> Optional[str]:
     return stripped
 
 
+def _render_second_brain_entry_summary(entry: Dict[str, Any]) -> str:
+    """One line per entry, preserving type/lifecycle/match-basis -- never
+    collapsed into free prose that would lose the PROBLEM/DECISION/
+    ACTION/OUTCOME/LESSON distinction (FASE 4O.6 STEP 5)."""
+    bits = [f"[{entry.get('id')}] ({entry.get('type')}) {entry.get('title')} -- {entry.get('summary')}"]
+    if entry.get("archived"):
+        bits.append("[ARCHIVED]")
+    if entry.get("superseded_by"):
+        bits.append(f"[superseded_by={entry.get('superseded_by')} -- a newer version exists]")
+    if "outcome_backed" in entry:
+        bits.append(f"[outcome_backed={entry.get('outcome_backed')}]")
+    return " ".join(bits)
+
+
+def _render_second_brain_candidate_summary(cand: Dict[str, Any]) -> str:
+    basis_parts = []
+    if cand.get("matched_domains"):
+        basis_parts.append(f"domain={cand['matched_domains']}")
+    if cand.get("matched_entities"):
+        basis_parts.append(f"entity={cand['matched_entities']}")
+    if cand.get("matched_terms"):
+        basis_parts.append(f"term={cand['matched_terms']}")
+    if cand.get("relationship_basis"):
+        basis_parts.append(f"relationship=[{'; '.join(cand['relationship_basis'])}]")
+    return (
+        f"[{cand.get('entry_id')}] ({cand.get('type')}, {cand.get('active_or_superseded')}) "
+        f"matched via {cand.get('retrieval_level')}: {', '.join(basis_parts) or 'n/a'}"
+    )
+
+
+def _classify_second_brain_result(evidence: OperationalEvidence, tr: ToolResult) -> None:
+    """FASE 4O.6: Second Brain results carry no OPS Bridge envelope --
+    each tool's own metadata shape (asserted from second_brain_tools.py,
+    not guessed) is read directly. Every item is tagged
+    HISTORICAL_EXPERIENCE and rendered with its stored trust_status/
+    provenance -- Second Brain's own EntryTrustStatus vocabulary, never
+    conflated with OPS ONE's (see second_brain/types.py's own warning
+    against comparing the two namespaces)."""
+    meta = tr.metadata if isinstance(tr.metadata, dict) else {}
+
+    entries: List[Dict[str, Any]] = []
+    if isinstance(meta.get("entries"), list):  # second_brain_search
+        entries = meta["entries"]
+    elif "id" in meta and "type" in meta:  # second_brain_get -- the summary dict itself, unwrapped
+        entries = [meta]
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        evidence.historical_experience.append(
+            EvidenceItem(
+                kind="historical",
+                source_class=SOURCE_HISTORICAL_EXPERIENCE,
+                tool_name=tr.tool_name,
+                domain=(entry.get("domains") or [None])[0] if isinstance(entry.get("domains"), list) else None,
+                period=None,
+                period_status=None,
+                trust_status=entry.get("trust_status"),
+                provenance=entry.get("provenance"),
+                summary=_render_second_brain_entry_summary(entry),
+            )
+        )
+
+    candidates = meta.get("candidates") if isinstance(meta.get("candidates"), list) else []
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        evidence.historical_experience.append(
+            EvidenceItem(
+                kind="historical",
+                source_class=SOURCE_HISTORICAL_EXPERIENCE,
+                tool_name=tr.tool_name,
+                domain=None,
+                period=None,
+                period_status=None,
+                trust_status=None,
+                provenance=None,
+                summary=_render_second_brain_candidate_summary(cand),
+            )
+        )
+
+    # STEP 11: an explicit zero-results call is a reportable gap, not
+    # silence -- the model must be able to say "no historical precedent
+    # was found" rather than never mentioning it looked.
+    if not entries and not candidates:
+        num = meta.get("num_results", meta.get("num_candidates"))
+        if num == 0:
+            evidence.limitations.append(
+                f"[{tr.tool_name}] Second Brain queried -- no historical precedent found."
+            )
+
+
+def _classify_document_result(evidence: OperationalEvidence, tr: ToolResult) -> None:
+    """FASE 4O.6: Document Knowledge results carry no OPS Bridge envelope
+    either. Every item is tagged DOCUMENT_EVIDENCE with its real citation
+    (filename/page/section) as `provenance` -- exactly what lets the model
+    say "According to X, page Y..." instead of presenting the text as its
+    own knowledge, and exactly what STEP 12 needs to detect a document
+    number disagreeing with a certified FACT."""
+    meta = tr.metadata if isinstance(tr.metadata, dict) else {}
+    results = meta.get("results") if isinstance(meta.get("results"), list) else []
+
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        evidence.document_evidence.append(
+            EvidenceItem(
+                kind="document",
+                source_class=SOURCE_DOCUMENT_EVIDENCE,
+                tool_name=tr.tool_name,
+                domain=None,
+                period=None,
+                period_status=None,
+                trust_status=None,
+                provenance=r.get("citation"),
+                summary=str(r.get("content", "")),
+            )
+        )
+
+    if not results and meta.get("num_results") == 0:
+        evidence.limitations.append(
+            f"[{tr.tool_name}] Document Knowledge queried -- no matching source found."
+        )
+
+
 def build_evidence(tool_results: List[ToolResult]) -> OperationalEvidence:
     """Builds an OperationalEvidence snapshot from the ToolResults collected
-    so far. Reads only ToolResult.metadata (the full Bridge envelope,
-    already set verbatim by ops_bridge_generic.py) -- never re-fetches,
-    never recomputes, never reinterprets a value.
+    so far, across every governed source family this turn.
+
+    OPS Bridge results: read only ToolResult.metadata (the full Bridge
+    envelope, already set verbatim by ops_bridge_generic.py) -- never
+    re-fetches, never recomputes, never reinterprets a value. Second
+    Brain / Document Knowledge results: read only their own tool's
+    already-asserted metadata shape (FASE 4O.6) -- same non-invasive
+    contract, different tool family.
     """
     evidence = OperationalEvidence()
 
     for tr in tool_results:
+        if tr.tool_name in _SECOND_BRAIN_TOOL_NAMES:
+            _classify_second_brain_result(evidence, tr)
+            continue
+        if tr.tool_name in _DOCUMENT_KNOWLEDGE_TOOL_NAMES:
+            _classify_document_result(evidence, tr)
+            continue
+
         envelope = tr.metadata if isinstance(tr.metadata, dict) else None
         if not envelope:
             continue
@@ -184,6 +400,7 @@ def build_evidence(tool_results: List[ToolResult]) -> OperationalEvidence:
             evidence.knowledge.append(
                 EvidenceItem(
                     kind="knowledge",
+                    source_class=SOURCE_KNOWLEDGE_DEFINITION,
                     tool_name=tr.tool_name,
                     domain=data_domain or domain,
                     period=None,
@@ -208,6 +425,7 @@ def build_evidence(tool_results: List[ToolResult]) -> OperationalEvidence:
             evidence.facts.append(
                 EvidenceItem(
                     kind="fact",
+                    source_class=SOURCE_CURRENT_OPERATIONAL_FACT,
                     tool_name=tr.tool_name,
                     domain=domain,
                     period=envelope.get("period"),

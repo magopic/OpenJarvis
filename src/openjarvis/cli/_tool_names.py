@@ -20,6 +20,20 @@ _SECOND_BRAIN_TOOL_IDS = (
     "second_brain_find_related_experiences",  # FASE 4N.4
 )
 
+# FASE 4O.6: Document Knowledge tools are safe to auto-enable for the same
+# reason Second Brain tools are -- every authorization/confinement rule
+# (workspace root, sensitive-file blocking) is enforced inside
+# DocumentKnowledgeService/the workspace module itself, nothing external
+# to verify here. This phase's audit found Document Knowledge was the one
+# governed tool family NOT unioned in below (Second Brain always was),
+# meaning a default MAIA session could never actually reach it -- a
+# registration gap, not a routing/scoring gap. Fixed here, mirroring the
+# Second Brain pattern exactly.
+_DOCUMENT_KNOWLEDGE_TOOL_IDS = (
+    "document_search",
+    "document_list_sources",
+)
+
 
 def _normalize_tool_names(value: Any) -> list[str]:
     """Normalize configured tool names from string or list-like values."""
@@ -76,5 +90,9 @@ def resolve_tool_names(
     for sb_id in _SECOND_BRAIN_TOOL_IDS:
         if sb_id not in names:
             names.append(sb_id)
+
+    for dk_id in _DOCUMENT_KNOWLEDGE_TOOL_IDS:
+        if dk_id not in names:
+            names.append(dk_id)
 
     return names

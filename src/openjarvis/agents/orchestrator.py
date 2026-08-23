@@ -18,7 +18,11 @@ import re
 from typing import Any, List, Optional
 
 from openjarvis.agents._stubs import AgentContext, AgentResult, ToolUsingAgent
-from openjarvis.agents.operational_evidence import build_evidence
+from openjarvis.agents.operational_evidence import (
+    _DOCUMENT_KNOWLEDGE_TOOL_NAMES,
+    _SECOND_BRAIN_TOOL_NAMES,
+    build_evidence,
+)
 from openjarvis.core.events import EventBus
 from openjarvis.core.registry import AgentRegistry
 from openjarvis.core.types import Message, Role, ToolCall, ToolResult
@@ -35,6 +39,24 @@ from openjarvis.tools._stubs import BaseTool
 _ROUTING_BASE_TOP_N = 5
 _ROUTING_EXPANSION_STEP = 2
 _ROUTING_MAX_EXPANSIONS = 2
+
+# FASE 4O.6A: bounded evidence-coverage check. Second Brain and Document
+# Knowledge tools are always-on (tool_router.py never scores/caps them the
+# way it does ops_dynamic_*), so -- unlike OPS -- nothing previously
+# checked whether the model actually attempted them at all before
+# finalizing an answer. This is a structural, tool-name-based grouping
+# (reusing operational_evidence.py's own frozensets, the same source of
+# truth its evidence classification already uses), never a keyword/phrase/
+# language/business-domain match on the question text. `document_list_sources`
+# is included here (but not in operational_evidence.py's own
+# _DOCUMENT_KNOWLEDGE_TOOL_NAMES, which is evidence-bearing-results only)
+# because attempting it still counts as the model having checked the
+# Document Knowledge family.
+_COVERAGE_FAMILIES = {
+    "historical experience (Second Brain)": _SECOND_BRAIN_TOOL_NAMES,
+    "document evidence (Document Knowledge)": _DOCUMENT_KNOWLEDGE_TOOL_NAMES
+    | frozenset({"document_list_sources"}),
+}
 
 
 @AgentRegistry.register("orchestrator")
@@ -336,6 +358,7 @@ class OrchestratorAgent(ToolUsingAgent):
         total_prompt_tokens = 0
         total_completion_tokens = 0
         made_tool_call_last_turn = False
+        coverage_nudge_used = False
 
         for _turn in range(self._max_turns):
             turns += 1
@@ -376,6 +399,40 @@ class OrchestratorAgent(ToolUsingAgent):
 
             # No tool calls -> check continuation, then final answer
             if not raw_tool_calls:
+                # FASE 4O.6A: one bounded evidence-coverage nudge. If an
+                # always-on evidence family (Second Brain / Document
+                # Knowledge) is available this session but was never
+                # attempted in ANY prior turn, give the model exactly one
+                # chance to consider it before accepting a final answer --
+                # never forced, never repeated (coverage_nudge_used latches
+                # after this fires once, mirroring the existing bounded
+                # _ROUTING_MAX_EXPANSIONS pattern above). A missing source
+                # remains an acceptable outcome: the nudge text explicitly
+                # permits finalizing without it and forbids guessing.
+                if not coverage_nudge_used:
+                    available_names = {t.spec.name for t in self._tools}
+                    attempted_names = {tr.tool_name for tr in all_tool_results}
+                    unattempted_families = [
+                        label
+                        for label, names in _COVERAGE_FAMILIES.items()
+                        if (names & available_names) and not (names & attempted_names)
+                    ]
+                    if unattempted_families:
+                        coverage_nudge_used = True
+                        nudge = (
+                            "[EVIDENCE COVERAGE CHECK] Before finalizing, note "
+                            "that the following evidence sources are available "
+                            "this session but have not been checked yet: "
+                            + "; ".join(unattempted_families)
+                            + ". If your answer would genuinely benefit from "
+                            "one of them, you may check it now. If not, it is "
+                            "fine to finalize your answer without it -- do not "
+                            "call a source that is not relevant, and do not "
+                            "guess at what it would say."
+                        )
+                        messages.append(Message(role=Role.USER, content=nudge))
+                        continue
+
                 content = self._check_continuation(result, messages)
                 content = self._strip_think_tags(content)
                 self._emit_turn_end(turns=turns, content_length=len(content))

@@ -42,7 +42,19 @@ class FileStateStore:
 
     def __init__(self, db_path: Path) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path))
+        # FASE 4O.6A: DocumentKnowledgeService (which owns this store) is
+        # constructed once per tool instance and then invoked by whichever
+        # thread the orchestrator dispatches a tool call on -- the
+        # orchestrator's tool-execution loop is not guaranteed single-
+        # threaded. `check_same_thread=False` matches the same pattern
+        # already used by every other SQLite-backed store in this codebase
+        # (connectors/store.py::KnowledgeStore, second_brain/store.py::
+        # SecondBrainStore) -- this file was the one place that pattern
+        # was missed, causing a live-reproduced "SQLite objects created in
+        # a thread can only be used in that same thread" failure on
+        # document_list_sources/document_search when called alongside
+        # other tools in one turn.
+        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute(
             """
