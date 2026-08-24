@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
@@ -18,6 +19,7 @@ from openjarvis.core.config import JarvisConfig
 from openjarvis.core.events import Event, EventBus, EventType
 from openjarvis.core.registry import AgentRegistry, ToolRegistry
 from openjarvis.core.types import Role, ToolCall, ToolResult
+from openjarvis.engine import EngineConnectionError
 from openjarvis.memory.store import LocalFactStore
 from openjarvis.tools._stubs import BaseTool, ToolSpec
 
@@ -389,3 +391,326 @@ class TestChatAgents:
         assert result.exit_code == 0
         assert "Confirm:" in result.output
         assert "chat executed!" in result.output
+
+
+class TestChatEngineSelectionParity:
+    """FASE 4Q.1A -- letters A-F. ``jarvis chat`` must resolve engine+model
+    exactly like ``jarvis ask`` (FASE 4P.3A's strict pairing), never
+    silently substitute a different engine, and the banner must always
+    reflect the ACTUALLY resolved engine/model, not raw CLI flags."""
+
+    def test_a_explicit_cloud_plus_explicit_model_passed_through_strictly(self) -> None:
+        """A: --engine cloud --model claude-sonnet-4-6 must reach
+        get_engine() as an explicit (engine_key, model) pair -- the exact
+        shape that activates FASE 4P.3A's strict-pairing guard. The guard's
+        own correctness is covered by
+        tests/engine/test_cloud_engine_selection_integrity.py (frozen,
+        untouched); this only proves chat wires up to it, unlike before."""
+        engine = MagicMock()
+        engine.engine_id = "cloud"
+        engine.generate.return_value = {"content": "OK"}
+        config = JarvisConfig()
+
+        captured_calls = []
+
+        def _fake_get_engine(cfg, engine_key=None, model=None):
+            captured_calls.append((engine_key, model))
+            return ("cloud", engine)
+
+        with (
+            patch("openjarvis.cli.chat_cmd.load_config", return_value=config),
+            patch("openjarvis.engine.get_engine", side_effect=_fake_get_engine),
+            patch("openjarvis.intelligence.register_builtin_models"),
+        ):
+            result = CliRunner().invoke(
+                chat,
+                ["--engine", "cloud", "--model", "claude-sonnet-4-6"],
+                input="hi\n/quit\n",
+            )
+
+        assert result.exit_code == 0
+        assert captured_calls == [("cloud", "claude-sonnet-4-6")]
+
+    def test_b_explicit_cloud_unavailable_explicit_error_no_local_fallback(self) -> None:
+        """B: get_engine() raising EngineConnectionError (the strict
+        pairing's own failure mode) must surface as a clear CLI error and
+        exit non-zero -- never silently proceed with any other engine."""
+        config = JarvisConfig()
+
+        with (
+            patch("openjarvis.cli.chat_cmd.load_config", return_value=config),
+            patch(
+                "openjarvis.engine.get_engine",
+                side_effect=EngineConnectionError(
+                    "Requested engine 'cloud' is not usable (health check failed)."
+                ),
+            ),
+            patch("openjarvis.intelligence.register_builtin_models"),
+        ):
+            result = CliRunner().invoke(
+                chat,
+                ["--engine", "cloud", "--model", "claude-sonnet-4-6"],
+                input="hi\n/quit\n",
+            )
+
+        assert result.exit_code != 0
+        assert "not usable" in result.output
+        assert "llamacpp" not in result.output.lower()
+
+    def test_c_explicit_model_not_serviceable_explicit_error(self) -> None:
+        """C: the OTHER strict-pairing failure mode (engine reachable, but
+        cannot serve the specific requested model) -- same hard-stop
+        contract as B, distinct message."""
+        config = JarvisConfig()
+
+        with (
+            patch("openjarvis.cli.chat_cmd.load_config", return_value=config),
+            patch(
+                "openjarvis.engine.get_engine",
+                side_effect=EngineConnectionError(
+                    "Requested engine 'cloud' cannot serve model 'claude-sonnet-4-6'."
+                ),
+            ),
+            patch("openjarvis.intelligence.register_builtin_models"),
+        ):
+            result = CliRunner().invoke(
+                chat,
+                ["--engine", "cloud", "--model", "claude-sonnet-4-6"],
+                input="hi\n/quit\n",
+            )
+
+        assert result.exit_code != 0
+        assert "cannot serve model" in result.output
+
+    def test_d_default_auto_behavior_legacy_fallback_preserved(self) -> None:
+        """D: with no --engine at all (only --model, exactly like every
+        pre-existing chat test in this file), get_engine() must be called
+        with engine_key=None -- never spuriously activating the strict
+        branch just because a model happens to be set. Undirected/
+        auto-fallback selection (#73's behavior) stays intact."""
+        engine = MagicMock()
+        engine.engine_id = "mock"
+        engine.generate.return_value = {"content": "fallback ok"}
+        config = JarvisConfig()
+
+        captured_calls = []
+
+        def _fake_get_engine(cfg, engine_key=None, model=None):
+            captured_calls.append((engine_key, model))
+            return ("mock", engine)
+
+        with (
+            patch("openjarvis.cli.chat_cmd.load_config", return_value=config),
+            patch("openjarvis.engine.get_engine", side_effect=_fake_get_engine),
+            patch("openjarvis.intelligence.register_builtin_models"),
+        ):
+            result = CliRunner().invoke(
+                chat,
+                ["--model", "test-model"],
+                input="hi\n/quit\n",
+            )
+
+        assert result.exit_code == 0
+        assert captured_calls == [(None, "test-model")]
+
+    def test_e_banner_reports_actual_resolved_engine(self) -> None:
+        """E: the banner must show the engine key get_engine() actually
+        returned, not the raw --engine flag value -- proven by resolving to
+        a DIFFERENT key than what was requested (an undirected request that
+        happens to land on 'cloud')."""
+        engine = MagicMock()
+        engine.engine_id = "cloud"
+        engine.generate.return_value = {"content": "OK"}
+        config = JarvisConfig()
+
+        with (
+            patch("openjarvis.cli.chat_cmd.load_config", return_value=config),
+            patch("openjarvis.engine.get_engine", return_value=("cloud", engine)),
+            patch("openjarvis.intelligence.register_builtin_models"),
+        ):
+            result = CliRunner().invoke(
+                chat,
+                ["--model", "test-model"],
+                input="hi\n/quit\n",
+            )
+
+        assert result.exit_code == 0
+        assert "Engine: cloud" in result.output
+
+    def test_f_model_propagates_into_agent_construction(self) -> None:
+        """F: the resolved model string must reach the agent's own
+        self._model (via BaseAgent.__init__), not just the direct
+        engine.generate() path."""
+        engine = MagicMock()
+        engine.engine_id = "mock"
+        config = JarvisConfig()
+
+        class _ModelEchoAgent(BaseAgent):
+            agent_id = "model_echo_agent"
+
+            def run(self, input, context: AgentContext | None = None, **kwargs):
+                return AgentResult(content=f"model-was-{self._model}", turns=1)
+
+        AgentRegistry.register_value("model_echo_agent", _ModelEchoAgent)
+
+        with (
+            patch("openjarvis.cli.chat_cmd.load_config", return_value=config),
+            patch("openjarvis.engine.get_engine", return_value=("mock", engine)),
+            patch("openjarvis.intelligence.register_builtin_models"),
+        ):
+            result = CliRunner().invoke(
+                chat,
+                ["--agent", "model_echo_agent", "--model", "claude-sonnet-4-6"],
+                input="hi\n/quit\n",
+            )
+
+        assert result.exit_code == 0
+        assert "model-was-claude-sonnet-4-6" in result.output
+
+
+class TestChatTurnTimeout:
+    """FASE 4Q.1A -- letters G-J. One chat turn must have a real wall-clock
+    bound; a timeout must never fabricate assistant output, must leave
+    prior history intact, and must let the user continue afterward."""
+
+    def test_g_overlong_agent_turn_is_bounded(self) -> None:
+        engine = MagicMock()
+        engine.engine_id = "mock"
+        config = JarvisConfig()
+
+        class _SlowChatAgent(BaseAgent):
+            agent_id = "slow_chat_agent_g"
+
+            def run(self, input, context: AgentContext | None = None, **kwargs):
+                time.sleep(2.0)
+                return AgentResult(content="should never be seen", turns=1)
+
+        AgentRegistry.register_value("slow_chat_agent_g", _SlowChatAgent)
+
+        with (
+            patch("openjarvis.cli.chat_cmd.load_config", return_value=config),
+            patch("openjarvis.engine.get_engine", return_value=("mock", engine)),
+            patch("openjarvis.intelligence.register_builtin_models"),
+        ):
+            result = CliRunner().invoke(
+                chat,
+                ["--agent", "slow_chat_agent_g", "--model", "test-model", "--turn-timeout", "0.2"],
+                input="hello\n/quit\n",
+            )
+
+        assert result.exit_code == 0
+        assert "timed out" in result.output.lower()
+
+    def test_i_timeout_produces_no_fabricated_reply(self) -> None:
+        engine = MagicMock()
+        engine.engine_id = "mock"
+        config = JarvisConfig()
+
+        class _SlowChatAgent(BaseAgent):
+            agent_id = "slow_chat_agent_i"
+
+            def run(self, input, context: AgentContext | None = None, **kwargs):
+                time.sleep(2.0)
+                return AgentResult(content="should never be seen", turns=1)
+
+        AgentRegistry.register_value("slow_chat_agent_i", _SlowChatAgent)
+
+        with (
+            patch("openjarvis.cli.chat_cmd.load_config", return_value=config),
+            patch("openjarvis.engine.get_engine", return_value=("mock", engine)),
+            patch("openjarvis.intelligence.register_builtin_models"),
+        ):
+            result = CliRunner().invoke(
+                chat,
+                ["--agent", "slow_chat_agent_i", "--model", "test-model", "--turn-timeout", "0.2"],
+                input="hello\n/quit\n",
+            )
+
+        assert result.exit_code == 0
+        assert "should never be seen" not in result.output
+
+    def test_h_prior_history_survives_a_timed_out_turn(self) -> None:
+        """H: turn 1 succeeds, turn 2 times out, turn 3 succeeds again --
+        turn 3's AgentContext must contain turn 1's real exchange, the
+        timed-out turn's user message (asked, honestly unanswered), and
+        crucially NO fabricated assistant reply for turn 2."""
+        engine = MagicMock()
+        engine.engine_id = "mock"
+        config = JarvisConfig()
+
+        captured_contexts: list[AgentContext | None] = []
+        calls = {"n": 0}
+
+        class _SometimesSlowAgent(BaseAgent):
+            agent_id = "sometimes_slow_agent_h"
+
+            def run(self, input, context: AgentContext | None = None, **kwargs):
+                calls["n"] += 1
+                captured_contexts.append(context)
+                if calls["n"] == 2:
+                    time.sleep(2.0)
+                    return AgentResult(content="never seen", turns=1)
+                return AgentResult(content=f"reply-{calls['n']}", turns=1)
+
+        AgentRegistry.register_value("sometimes_slow_agent_h", _SometimesSlowAgent)
+
+        with (
+            patch("openjarvis.cli.chat_cmd.load_config", return_value=config),
+            patch("openjarvis.engine.get_engine", return_value=("mock", engine)),
+            patch("openjarvis.intelligence.register_builtin_models"),
+        ):
+            result = CliRunner().invoke(
+                chat,
+                ["--agent", "sometimes_slow_agent_h", "--model", "test-model", "--turn-timeout", "0.2"],
+                input="first turn\nsecond turn\nthird turn\n/quit\n",
+            )
+
+        assert result.exit_code == 0
+        assert "reply-1" in result.output
+        assert "timed out" in result.output.lower()
+        assert len(captured_contexts) == 3
+
+        third_context = captured_contexts[2]
+        assert third_context is not None
+        prior_texts = [m.content for m in third_context.conversation.messages]
+        assert "first turn" in prior_texts
+        assert "reply-1" in prior_texts
+        # The timed-out turn's own user message survives (asked, not erased)...
+        assert "second turn" in prior_texts
+        # ...but no fabricated assistant reply was ever inserted for it.
+        assert "never seen" not in prior_texts
+
+    def test_j_user_can_continue_after_a_timeout(self) -> None:
+        """J: the session does not crash or exit on a timeout -- the user
+        can keep chatting, and a clean /quit still exits 0 afterward."""
+        engine = MagicMock()
+        engine.engine_id = "mock"
+        config = JarvisConfig()
+        calls = {"n": 0}
+
+        class _SometimesSlowAgent(BaseAgent):
+            agent_id = "sometimes_slow_agent_j"
+
+            def run(self, input, context: AgentContext | None = None, **kwargs):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    time.sleep(2.0)
+                    return AgentResult(content="never seen", turns=1)
+                return AgentResult(content="recovered fine", turns=1)
+
+        AgentRegistry.register_value("sometimes_slow_agent_j", _SometimesSlowAgent)
+
+        with (
+            patch("openjarvis.cli.chat_cmd.load_config", return_value=config),
+            patch("openjarvis.engine.get_engine", return_value=("mock", engine)),
+            patch("openjarvis.intelligence.register_builtin_models"),
+        ):
+            result = CliRunner().invoke(
+                chat,
+                ["--agent", "sometimes_slow_agent_j", "--model", "test-model", "--turn-timeout", "0.2"],
+                input="first turn\nsecond turn\n/quit\n",
+            )
+
+        assert result.exit_code == 0
+        assert calls["n"] == 2
+        assert "recovered fine" in result.output

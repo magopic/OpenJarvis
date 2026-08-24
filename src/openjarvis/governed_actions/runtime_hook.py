@@ -30,7 +30,7 @@ _AFFIRMATIVE_PHRASES = frozenset(
         "confirmed", "confirm", "approved", "approve", "ok", "okay",
         "sure", "proceed", "affirmative",
         # Italian
-        "si", "sì", "fallo", "procedi", "confermo", "confermato",
+        "si", "sì", "fallo", "procedi", "procediamo", "confermo", "confermato",
         "va bene", "vai", "d'accordo", "daccordo",
     }
 )

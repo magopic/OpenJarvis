@@ -38,6 +38,14 @@ def _monitor_full(m: Any) -> Dict[str, Any]:
             "principal": m.principal,
             "created_at": m.created_at,
             "bounds": m.bounds,
+            # FASE 4Q.1 claim-integrity review: structural, not narrated --
+            # the model must see this directly rather than assume automatic
+            # execution. None means no scheduler task is actually wired for
+            # this monitor (the default MonitorService() every model-facing
+            # tool constructs never receives a real scheduler -- see
+            # register_default_capabilities-style wiring in tools/__init__.py),
+            # so nothing will invoke it on cadence until one is.
+            "scheduler_task_id": getattr(m, "scheduler_task_id", None),
         }
     )
     return d
@@ -127,10 +135,16 @@ class MonitorCreateTool(BaseTool):
             description=(
                 "Create a new proactive monitor -- configuration only, this does NOT "
                 "execute anything and does NOT send any external notification. The "
-                "monitor will periodically (per its cadence) re-check the exact same "
-                "kind of governed sources maia_analyze_evidence_for_insights checks, "
-                "and only surface an internal notification when something actually "
-                "changed (new/changed/resolved/reopened) -- never every cycle."
+                "monitor is saved and enabled for its cadence, but it only actually "
+                "runs if a scheduler process is configured to invoke it -- check the "
+                "returned scheduler_task_id: null means nothing will run it "
+                "automatically yet, in which case tell the user this was saved but "
+                "is not yet actively running, rather than promising it will check "
+                "'every day' on its own. Even when a cycle does run, any resulting "
+                "notification is stored internally (via maia_notifications_list) -- "
+                "it is NEVER pushed or delivered into a chat session automatically. "
+                "Never tell the user they will be notified 'here' or 'in this chat' "
+                "-- they (or you, in a later turn) must actively check for it."
             ),
             parameters={
                 "type": "object",
@@ -172,7 +186,23 @@ class MonitorCreateTool(BaseTool):
             )
         except ValueError as exc:
             return ToolResult(tool_name="maia_monitor_create", content=str(exc), success=False)
-        return ToolResult(tool_name="maia_monitor_create", content=json.dumps(_monitor_full(mon)), success=True)
+        result = _monitor_full(mon)
+        # FASE 4Q.1 claim-integrity review: an explicit, structural note the
+        # model sees every time -- not something it has to remember from the
+        # tool description alone (mirrors the LIMITATIONS pattern used by
+        # agents/operational_evidence.py's build_evidence()). Kept as an
+        # additional top-level key (not a nested wrapper) so existing callers
+        # reading the monitor's own fields directly (e.g. result["id"]) are
+        # unaffected.
+        if result.get("scheduler_task_id") is None:
+            result["execution_note"] = (
+                "No scheduler task is currently wired to this monitor -- it is "
+                "saved and enabled, but nothing will invoke it automatically yet. "
+                "Tell the user it was saved, not that it is actively checking. "
+                "Any future notification would need maia_notifications_list to "
+                "be checked explicitly -- it is never pushed into this chat."
+            )
+        return ToolResult(tool_name="maia_monitor_create", content=json.dumps(result), success=True)
 
 
 @ToolRegistry.register("maia_monitor_enable")

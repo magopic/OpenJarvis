@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import sys
 from typing import List, Optional
@@ -42,6 +43,17 @@ def _read_input(prompt: str = "You> ") -> Optional[str]:
         "(overrides config). Pass 'none' to disable all persona files."
     ),
 )
+@click.option(
+    "--turn-timeout",
+    "turn_timeout",
+    default=300.0,
+    type=float,
+    help=(
+        "Wall-clock bound in seconds for ONE chat turn (default 300 = 5 "
+        "minutes). If exceeded, the turn is abandoned with a clear error -- "
+        "prior conversation history is unaffected and the session continues."
+    ),
+)
 def chat(
     engine_key: str | None,
     model_name: str | None,
@@ -49,6 +61,7 @@ def chat(
     tools: str | None,
     system_prompt: str | None,
     persona_name: str | None,
+    turn_timeout: float,
 ) -> None:
     """Start an interactive multi-turn chat session.
 
@@ -73,12 +86,26 @@ def chat(
     )
 
     # Resolve engine
-    from openjarvis.engine import get_engine
+    from openjarvis.engine import EngineConnectionError, get_engine
     from openjarvis.intelligence import register_builtin_models
 
     register_builtin_models()
 
-    resolved = get_engine(config, engine_key)
+    # FASE 4Q.1A: mirror ask.py's exact strict-pairing call (FASE 4P.3A) --
+    # when engine_key AND model are BOTH given together, that pairing is
+    # authoritative: it either succeeds or raises EngineConnectionError, and
+    # never silently substitutes a different engine/model (e.g. a local
+    # engine standing in for an explicitly requested cloud model). Before
+    # this fix, chat never passed `model` into get_engine() at all, so this
+    # guard could never activate here even though it was already frozen and
+    # working for `jarvis ask`. Reuses the same resolver -- no new logic.
+    effective_engine_key = engine_key or config.intelligence.preferred_engine or None
+    selection_model = model_name or config.intelligence.default_model or None
+    try:
+        resolved = get_engine(config, effective_engine_key, model=selection_model)
+    except EngineConnectionError as exc:
+        console.print(f"[red bold]Engine error:[/red bold] {exc}")
+        sys.exit(1)
     if resolved is None:
         console.print("[red]No inference engine available.[/red]")
         sys.exit(1)
@@ -328,7 +355,7 @@ def chat(
                 logger.debug("Failed to inject memory context", exc_info=True)
 
         # Generate response even when optional memory context is unavailable.
-        try:
+        def _run_turn() -> str:
             if agent is not None:
                 from openjarvis.agents._stubs import AgentContext
 
@@ -339,16 +366,45 @@ def chat(
                     if msg.role != Role.SYSTEM:
                         agent_context.conversation.add(msg)
                 response = agent.run(user_input, context=agent_context)
-                content = (
-                    response.content if hasattr(response, "content") else str(response)
-                )
+                return response.content if hasattr(response, "content") else str(response)
             else:
                 result = engine.generate(generation_history, model=model)
-                content = (
+                return (
                     result.get("content", "")
                     if isinstance(result, dict)
                     else str(result)
                 )
+
+        # FASE 4Q.1A: bound ONE turn's wall-clock time. Neither the per-HTTP
+        # timeout inside engine clients (up to 600s) nor the loop guard
+        # (bounds repeated identical calls, not elapsed time) stop a slow or
+        # misrouted engine from making one turn run for an unbounded amount
+        # of wall-clock time (observed: ~1h40 against a silently-substituted
+        # local engine). Reuses the same ThreadPoolExecutor primitive
+        # orchestrator.py already uses for parallel tool execution, applied
+        # here at the turn level instead -- not a new abstraction.
+        #
+        # A timed-out call is NOT forcibly killed (Python has no safe,
+        # cross-platform way to do that to a thread blocked in a C-level
+        # socket read -- especially not on Windows). The worker thread is
+        # abandoned (`shutdown(wait=False)`) and left to finish on its own,
+        # bounded by the engine client's own per-call timeout; the *chat
+        # loop* is not blocked waiting for it, so the user regains control
+        # immediately.
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        try:
+            future = pool.submit(_run_turn)
+            try:
+                content = future.result(timeout=turn_timeout)
+            except concurrent.futures.TimeoutError:
+                console.print(
+                    f"\n[red]Turn timed out after {turn_timeout:.0f}s -- no "
+                    "response was generated. Prior conversation history is "
+                    "unaffected; you can try again or /quit.[/red]\n"
+                )
+                pool.shutdown(wait=False)
+                continue
+            pool.shutdown(wait=False)
 
             history.append(Message(role=Role.ASSISTANT, content=content))
             console.print()
@@ -363,8 +419,10 @@ def chat(
             )
         except KeyboardInterrupt:
             console.print("\n[dim]Generation interrupted.[/dim]")
+            pool.shutdown(wait=False)
         except Exception as exc:
             console.print(f"\n[red]Error: {exc}[/red]\n")
+            pool.shutdown(wait=False)
 
     if memory_service is not None:
         memory_service.stop()
