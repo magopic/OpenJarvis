@@ -70,6 +70,21 @@ CREATE TABLE IF NOT EXISTS monitor_notifications (
 );
 """
 
+# FASE 4Q.2 STEP 11 -- concurrency guard. A separate table (not a column
+# on `monitors`) so it never needs a schema migration on an existing real
+# monitoring.db: the PRIMARY KEY on monitor_id makes claiming atomic (an
+# INSERT either succeeds or raises IntegrityError -- no read-then-write
+# race), and it survives a process crash mid-run (unlike an in-memory
+# lock), which is exactly the case that needs a *stale*-lock expiry
+# rather than a lock that's held forever.
+_CREATE_RUN_LOCKS_TABLE = """\
+CREATE TABLE IF NOT EXISTS monitor_run_locks (
+    monitor_id  TEXT PRIMARY KEY,
+    run_id      TEXT NOT NULL,
+    claimed_at  TEXT NOT NULL
+);
+"""
+
 
 class MonitorStore:
     """SQLite CRUD store for monitors, runs, issue state, notifications."""
@@ -82,6 +97,46 @@ class MonitorStore:
         self._conn.execute(_CREATE_RUNS_TABLE)
         self._conn.execute(_CREATE_ISSUE_STATE_TABLE)
         self._conn.execute(_CREATE_NOTIFICATIONS_TABLE)
+        self._conn.execute(_CREATE_RUN_LOCKS_TABLE)
+        self._conn.commit()
+
+    # -- Run concurrency guard (FASE 4Q.2 STEP 11) ------------------------
+
+    def try_claim_run(self, monitor_id: str, run_id: str, stale_after_seconds: float) -> bool:
+        """Atomically claim the right to run *monitor_id* as *run_id*.
+
+        Expires and steals any lock older than *stale_after_seconds*
+        first -- this is what makes a crash/restart mid-run recover on
+        its own rather than permanently wedging the monitor (STEP 9/11's
+        "restart during run"). Returns True if the claim succeeded
+        (caller must run_cycle then release_run), False if another run
+        is genuinely still active."""
+        import time
+
+        cutoff = str(time.time() - stale_after_seconds)
+        self._conn.execute(
+            "DELETE FROM monitor_run_locks WHERE monitor_id = ? AND claimed_at < ?",
+            (monitor_id, cutoff),
+        )
+        try:
+            self._conn.execute(
+                "INSERT INTO monitor_run_locks (monitor_id, run_id, claimed_at) VALUES (?, ?, ?)",
+                (monitor_id, run_id, str(time.time())),
+            )
+            self._conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            self._conn.commit()  # commit the stale-lock DELETE above either way
+            return False
+
+    def release_run(self, monitor_id: str, run_id: str) -> None:
+        """Release a claim -- only if *run_id* still holds it, so a stale
+        claim this process already lost to someone else's fresh claim is
+        never accidentally cleared out from under them."""
+        self._conn.execute(
+            "DELETE FROM monitor_run_locks WHERE monitor_id = ? AND run_id = ?",
+            (monitor_id, run_id),
+        )
         self._conn.commit()
 
     # -- Monitor CRUD ----------------------------------------------------

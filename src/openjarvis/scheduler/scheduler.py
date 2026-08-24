@@ -168,6 +168,17 @@ class TaskScheduler:
             rows = self._store.list_tasks(status=status)
         return [ScheduledTask.from_dict(r) for r in rows]
 
+    def get_task(self, task_id: str) -> Optional[ScheduledTask]:
+        """Return one task by id, or ``None`` if it doesn't exist. FASE
+        4Q.2: the one read accessor every other caller had to fall back to
+        list_tasks()-and-filter for -- added here (generic, not
+        monitor-specific) so callers like monitor reconciliation can check
+        "does a task already exist for this id" without reimplementing
+        lookup or reaching into the store directly."""
+        with self._lock:
+            d = self._store.get_task(task_id)
+        return ScheduledTask.from_dict(d) if d is not None else None
+
     def pause_task(self, task_id: str) -> None:
         """Pause an active task."""
         with self._lock:

@@ -314,6 +314,27 @@ def scheduler_start(poll_interval: int) -> None:
 
     system = SystemBuilder(load_config()).build()
     sched = TaskScheduler(store, system, poll_interval=poll_interval)
+
+    # FASE 4Q.2 STEP 6: startup reconciliation -- this is THE moment the
+    # monitoring runtime actually starts, so it's the correct, single
+    # place to repair monitor<->scheduler bindings (idempotent: safe on
+    # every restart, never duplicates a ScheduledTask). Best-effort -- a
+    # reconciliation failure must never prevent the scheduler daemon
+    # itself from starting.
+    try:
+        from openjarvis.monitoring.service import MonitorService
+
+        mon_result = MonitorService(scheduler=sched).reconcile_scheduler_bindings()
+        if mon_result["created"] or mon_result["repaired"] or mon_result["paused"]:
+            console.print(
+                f"[dim]Monitor scheduler reconciliation: "
+                f"{len(mon_result['created'])} created, "
+                f"{len(mon_result['repaired'])} repaired, "
+                f"{len(mon_result['paused'])} paused.[/dim]"
+            )
+    except Exception as exc:
+        console.print(f"[yellow]Monitor scheduler reconciliation failed: {exc}[/yellow]")
+
     sched.start()
     console.print(
         f"[green]Scheduler running (poll every {poll_interval}s). "

@@ -11,9 +11,20 @@ from typing import Any, Dict, Optional
 
 from openjarvis.core.registry import ToolRegistry
 from openjarvis.core.types import ToolResult
-from openjarvis.monitoring.service import MonitorService
+from openjarvis.monitoring.service import MonitorService, get_default_task_scheduler
 from openjarvis.monitoring.types import VALID_CADENCES
 from openjarvis.tools._stubs import BaseTool, ToolSpec
+
+
+def _default_scheduled_monitor_service() -> MonitorService:
+    """FASE 4Q.2: the real, scheduler-bound MonitorService used by the
+    three tools that actually create/enable/disable monitors --
+    MonitorService's own bare default (used everywhere else: list/get/
+    run_now/notifications, and every test) deliberately stays
+    scheduler=None so it never has a surprise side effect on an isolated
+    test store. get_default_task_scheduler() itself respects
+    config.scheduler.enabled (default False) and never raises."""
+    return MonitorService(scheduler=get_default_task_scheduler())
 
 
 def _monitor_brief(m: Any) -> Dict[str, Any]:
@@ -126,7 +137,7 @@ class MonitorCreateTool(BaseTool):
     tool_id = "maia_monitor_create"
 
     def __init__(self, service: Optional[MonitorService] = None) -> None:
-        self._service = service or MonitorService()
+        self._service = service or _default_scheduled_monitor_service()
 
     @property
     def spec(self) -> ToolSpec:
@@ -134,17 +145,19 @@ class MonitorCreateTool(BaseTool):
             name="maia_monitor_create",
             description=(
                 "Create a new proactive monitor -- configuration only, this does NOT "
-                "execute anything and does NOT send any external notification. The "
-                "monitor is saved and enabled for its cadence, but it only actually "
-                "runs if a scheduler process is configured to invoke it -- check the "
-                "returned scheduler_task_id: null means nothing will run it "
-                "automatically yet, in which case tell the user this was saved but "
-                "is not yet actively running, rather than promising it will check "
-                "'every day' on its own. Even when a cycle does run, any resulting "
-                "notification is stored internally (via maia_notifications_list) -- "
-                "it is NEVER pushed or delivered into a chat session automatically. "
-                "Never tell the user they will be notified 'here' or 'in this chat' "
-                "-- they (or you, in a later turn) must actively check for it."
+                "execute anything and does NOT send any external notification. Check "
+                "the returned scheduler_task_id: null means nothing will run it "
+                "automatically -- tell the user it was saved but not actively "
+                "running. A non-null scheduler_task_id means it IS scheduled to run "
+                "on its cadence, but that still only actually happens while the "
+                "separate scheduler runtime process is running (not automatic just "
+                "because this chat session is open) -- do not claim it is 'checking "
+                "every day' as an unconditional guarantee. Even when a cycle does "
+                "run, any resulting notification is stored internally (via "
+                "maia_notifications_list) -- it is NEVER pushed or delivered into a "
+                "chat session automatically. Never tell the user they will be "
+                "notified 'here' or 'in this chat' -- they (or you, in a later turn) "
+                "must actively check for it."
             ),
             parameters={
                 "type": "object",
@@ -202,6 +215,15 @@ class MonitorCreateTool(BaseTool):
                 "Any future notification would need maia_notifications_list to "
                 "be checked explicitly -- it is never pushed into this chat."
             )
+        else:
+            result["execution_note"] = (
+                "A scheduler task was created for this monitor, but it only "
+                "actually fires while the separate scheduler runtime process is "
+                "running -- tell the user it is scheduled, not that it is "
+                "guaranteed to run unless you know that process is active. Any "
+                "resulting notification is never pushed into this chat -- it "
+                "must be checked explicitly via maia_notifications_list."
+            )
         return ToolResult(tool_name="maia_monitor_create", content=json.dumps(result), success=True)
 
 
@@ -210,7 +232,7 @@ class MonitorEnableTool(BaseTool):
     tool_id = "maia_monitor_enable"
 
     def __init__(self, service: Optional[MonitorService] = None) -> None:
-        self._service = service or MonitorService()
+        self._service = service or _default_scheduled_monitor_service()
 
     @property
     def spec(self) -> ToolSpec:
@@ -237,7 +259,7 @@ class MonitorDisableTool(BaseTool):
     tool_id = "maia_monitor_disable"
 
     def __init__(self, service: Optional[MonitorService] = None) -> None:
-        self._service = service or MonitorService()
+        self._service = service or _default_scheduled_monitor_service()
 
     @property
     def spec(self) -> ToolSpec:

@@ -37,6 +37,7 @@ from openjarvis.monitoring.types import (
     Notification,
     RUN_STATUS_FAILED,
     RUN_STATUS_PARTIAL,
+    RUN_STATUS_SKIPPED,
     RUN_STATUS_SUCCESS,
     TRANSITION_CHANGED,
     TRANSITION_NEW,
@@ -61,6 +62,45 @@ def _default_db_path() -> str:
     from openjarvis.core.paths import get_config_dir
 
     return str(Path(get_config_dir()) / "monitoring.db")
+
+
+def get_default_task_scheduler() -> Optional[Any]:
+    """FASE 4Q.2 -- the real, canonical scheduler wiring that was
+    entirely missing before this phase: every MonitorService(...) call
+    site anywhere in the codebase constructed with scheduler=None
+    (audited exhaustively -- see docs/MAIA_MONITORING_RUNTIME_V1.md).
+
+    Returns a CRUD-only TaskScheduler (scheduler/scheduler.py) bound to
+    the same persistent SchedulerStore the standalone `jarvis scheduler
+    start` daemon (scheduler_cmd.py) polls -- never starts a poll loop
+    or requires a JarvisSystem here, so this is safe and cheap to call
+    from any process (a `jarvis chat`/`jarvis ask` invocation creating or
+    enabling a monitor just needs to persist a ScheduledTask row; only
+    the separate, explicitly-started scheduler daemon process actually
+    executes due tasks -- see STEP 16 of the phase this was built in).
+
+    Respects config.scheduler.enabled (default False) -- deliberately
+    does not override the user's own choice to leave scheduling off;
+    when disabled this returns None, preserving the exact pre-4Q.2
+    behavior (monitors save with scheduler_task_id=None, MANUAL-only in
+    effect) rather than silently forcing scheduling on.
+
+    Never raises -- any failure to construct falls back to None, exactly
+    as the previous unconditional None default did, so a broken/missing
+    scheduler.db never blocks ordinary monitor creation.
+    """
+    try:
+        from openjarvis.core.config import DEFAULT_CONFIG_DIR, load_config
+        from openjarvis.scheduler.scheduler import TaskScheduler
+        from openjarvis.scheduler.store import SchedulerStore
+
+        config = load_config()
+        if not config.scheduler.enabled:
+            return None
+        db_path = config.scheduler.db_path or str(DEFAULT_CONFIG_DIR / "scheduler.db")
+        return TaskScheduler(SchedulerStore(db_path))
+    except Exception:
+        return None
 
 
 class MonitorService:
@@ -110,17 +150,32 @@ class MonitorService:
         )
 
         if cadence != CADENCE_MANUAL and self._scheduler is not None and enabled:
-            task = self._scheduler.create_task(
-                prompt=f"{MONITOR_PROMPT_PREFIX}{mon.id}",
-                schedule_type="interval",
-                schedule_value=str(_CADENCE_SECONDS[cadence]),
-                agent="monitor_check",
-                task_id=f"monitor:{mon.id}",
-            )
-            mon.scheduler_task_id = task.id
+            mon.scheduler_task_id = self._ensure_scheduler_task(mon)
 
         self._store.save_monitor(mon.to_dict())
         return mon
+
+    def _ensure_scheduler_task(self, mon: MonitorDefinition) -> Optional[str]:
+        """FASE 4Q.2: idempotent -- if a task with this monitor's
+        deterministic id already exists (whatever its status), reuse it
+        rather than creating a second one; only creates when genuinely
+        missing. Shared by create_monitor, enable_monitor, and
+        reconcile_scheduler_bindings so there is exactly one place that
+        decides how a monitor's ScheduledTask looks."""
+        if self._scheduler is None:
+            return mon.scheduler_task_id
+        task_id = mon.scheduler_task_id or f"monitor:{mon.id}"
+        existing = self._scheduler.get_task(task_id)
+        if existing is None:
+            task = self._scheduler.create_task(
+                prompt=f"{MONITOR_PROMPT_PREFIX}{mon.id}",
+                schedule_type="interval",
+                schedule_value=str(_CADENCE_SECONDS[mon.cadence]),
+                agent="monitor_check",
+                task_id=task_id,
+            )
+            return task.id
+        return existing.id
 
     def get_monitor(self, monitor_id: str) -> Optional[MonitorDefinition]:
         d = self._store.get_monitor(monitor_id)
@@ -137,8 +192,17 @@ class MonitorService:
         mon.status = MONITOR_STATUS_ACTIVE
         mon.consecutive_failures = 0
         if mon.cadence != CADENCE_MANUAL and self._scheduler is not None:
+            # FASE 4Q.2 fix: a monitor created while disabled never got a
+            # task in the first place (create_monitor only creates one
+            # when enabled=True at creation time) -- resume_task() alone
+            # would silently no-op (KeyError swallowed) forever in that
+            # case, leaving scheduler_task_id permanently None despite
+            # enabled=True. _ensure_scheduler_task creates if missing,
+            # reuses if present -- covers both the "never had a task" and
+            # the "had one, just paused" cases with one call.
+            mon.scheduler_task_id = self._ensure_scheduler_task(mon)
             try:
-                self._scheduler.resume_task(mon.scheduler_task_id or f"monitor:{mon.id}")
+                self._scheduler.resume_task(mon.scheduler_task_id)
             except KeyError:
                 pass
         self._store.save_monitor(mon.to_dict())
@@ -150,13 +214,80 @@ class MonitorService:
             raise KeyError(f"Monitor not found: {monitor_id}")
         mon.enabled = False
         mon.status = MONITOR_STATUS_DISABLED
-        if mon.cadence != CADENCE_MANUAL and self._scheduler is not None:
+        # scheduler_task_id is deliberately RETAINED, not cleared -- the
+        # underlying ScheduledTask row is paused, not deleted, so a later
+        # enable_monitor() correctly resumes the same task instead of
+        # creating a second one (STEP 4: "preserve monitor history").
+        if mon.cadence != CADENCE_MANUAL and self._scheduler is not None and mon.scheduler_task_id:
             try:
-                self._scheduler.pause_task(mon.scheduler_task_id or f"monitor:{mon.id}")
+                self._scheduler.pause_task(mon.scheduler_task_id)
             except KeyError:
                 pass
         self._store.save_monitor(mon.to_dict())
         return mon
+
+    def reconcile_scheduler_bindings(self) -> Dict[str, List[str]]:
+        """FASE 4Q.2 STEP 6 -- startup reconciliation. Call once when the
+        scheduler runtime starts (``jarvis scheduler start``), never
+        during ordinary monitor CRUD. Idempotent by construction: every
+        branch either finds an already-correct task and does nothing, or
+        performs the exact same deterministic-task-id create/resume/pause
+        _ensure_scheduler_task/resume_task/pause_task calls that
+        create_monitor/enable_monitor/disable_monitor already use --
+        calling this twice in a row produces the same end state and no
+        duplicate ScheduledTask rows (task_id is a SQLite PRIMARY KEY).
+
+        Returns which monitor ids were created, repaired (resumed or had
+        their scheduler_task_id field corrected), or paused (an orphaned
+        active task for a disabled/manual monitor) -- for logging/
+        diagnostics, not required by callers.
+        """
+        result: Dict[str, List[str]] = {"created": [], "repaired": [], "paused": []}
+        if self._scheduler is None:
+            return result
+
+        for mon in self.list_monitors():
+            should_be_active = mon.enabled and mon.cadence != CADENCE_MANUAL
+            task_id = mon.scheduler_task_id or f"monitor:{mon.id}"
+            existing = self._scheduler.get_task(task_id)
+
+            if should_be_active:
+                if existing is None:
+                    new_id = self._ensure_scheduler_task(mon)
+                    if new_id != mon.scheduler_task_id:
+                        mon.scheduler_task_id = new_id
+                        self._store.save_monitor(mon.to_dict())
+                    result["created"].append(mon.id)
+                elif existing.status != "active":
+                    try:
+                        self._scheduler.resume_task(task_id)
+                    except KeyError:
+                        pass
+                    if mon.scheduler_task_id != task_id:
+                        mon.scheduler_task_id = task_id
+                        self._store.save_monitor(mon.to_dict())
+                    result["repaired"].append(mon.id)
+                elif mon.scheduler_task_id != task_id:
+                    # Task exists and is active, but the monitor row's own
+                    # scheduler_task_id field is stale/missing -- repair
+                    # the field only, no scheduler call needed.
+                    mon.scheduler_task_id = task_id
+                    self._store.save_monitor(mon.to_dict())
+                    result["repaired"].append(mon.id)
+            else:
+                # Disabled or MANUAL: any lingering ACTIVE task is an
+                # orphan (e.g. cadence was DAILY when created, monitor was
+                # later disabled some other way) -- pause it, never leave
+                # an automatic trigger running for a monitor that should
+                # not be automatic right now.
+                if existing is not None and existing.status == "active":
+                    try:
+                        self._scheduler.pause_task(task_id)
+                    except KeyError:
+                        pass
+                    result["paused"].append(mon.id)
+
+        return result
 
     # -- Notifications -------------------------------------------------------
 
@@ -199,6 +330,35 @@ class MonitorService:
             self._store.save_run(run.to_dict())
             return run, []
 
+        # FASE 4Q.2 STEP 11: prevent two concurrent cycles for the same
+        # monitor (a scheduler trigger racing a manual run_now, a slow
+        # prior run still in flight, or -- in principle -- two scheduler
+        # daemons). Claim is atomic (SQLite PRIMARY KEY insert) and
+        # self-expiring (stale_after_seconds, from the monitor's own
+        # existing timeout_seconds bound) so a crash mid-run does not
+        # permanently wedge the monitor -- the next attempt after the
+        # bound simply steals the stale lock. A skipped run is still
+        # persisted (auditable) but never collects evidence, runs
+        # detection, or touches issue state/notifications -- STEP 9's "a
+        # scheduler failure must not create a fake business alert"
+        # applies here too: skipping is not a business outcome.
+        timeout_seconds = float((monitor.bounds or {}).get("timeout_seconds", 30))
+        if not self._store.try_claim_run(monitor_id, run.id, stale_after_seconds=timeout_seconds):
+            run.completed_at = _now_iso()
+            run.status = RUN_STATUS_SKIPPED
+            run.errors = ["monitor is already running (concurrent execution guard)"]
+            self._store.save_run(run.to_dict())
+            return run, []
+
+        try:
+            return self._run_cycle_locked(monitor, run)
+        finally:
+            self._store.release_run(monitor_id, run.id)
+
+    def _run_cycle_locked(
+        self, monitor: MonitorDefinition, run: MonitorRun
+    ) -> "tuple[MonitorRun, List[Notification]]":
+        monitor_id = monitor.id
         tool_results, collection_errors = self._collect_evidence(monitor)
         run.evidence_collected = len(tool_results)
 
@@ -238,6 +398,20 @@ class MonitorService:
             if monitor.consecutive_failures >= max_failures:
                 monitor.enabled = False
                 monitor.status = MONITOR_STATUS_DISABLED
+                # FASE 4Q.2: auto-disabling must behave exactly like a
+                # manual disable_monitor() -- otherwise the scheduler
+                # keeps firing an automatic trigger for a monitor the
+                # system itself just decided to stop, an orphan-task case
+                # STEP 6/9 both call out.
+                if (
+                    monitor.cadence != CADENCE_MANUAL
+                    and self._scheduler is not None
+                    and monitor.scheduler_task_id
+                ):
+                    try:
+                        self._scheduler.pause_task(monitor.scheduler_task_id)
+                    except KeyError:
+                        pass
         self._store.save_monitor(monitor.to_dict())
 
         return run, notifications

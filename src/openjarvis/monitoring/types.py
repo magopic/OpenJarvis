@@ -30,6 +30,12 @@ MONITOR_STATUS_DISABLED = "disabled"
 RUN_STATUS_SUCCESS = "success"
 RUN_STATUS_PARTIAL = "partial"
 RUN_STATUS_FAILED = "failed"
+# FASE 4Q.2 STEP 11 -- a run that never actually collected evidence or
+# ran detection because a concurrent run already held the guard. Never
+# produces a notification and never touches issue state -- distinct from
+# FAILED (a real attempt that broke) so it can be told apart in monitor
+# history/audit.
+RUN_STATUS_SKIPPED = "skipped"
 
 # Per-issue lifecycle (STEP 5) -- persisted state, not the per-cycle
 # transition label (below).
@@ -199,6 +205,7 @@ __all__ = [
     "RUN_STATUS_SUCCESS",
     "RUN_STATUS_PARTIAL",
     "RUN_STATUS_FAILED",
+    "RUN_STATUS_SKIPPED",
     "ISSUE_STATE_ACTIVE",
     "ISSUE_STATE_RESOLVED",
     "TRANSITION_NEW",
