@@ -104,6 +104,10 @@ try:
 except ImportError:
     pass
 try:
+    import openjarvis.tools.governed_action_tools  # noqa: F401
+except ImportError:
+    pass
+try:
     import openjarvis.tools.user_profile_manage  # noqa: F401
 except ImportError:
     pass

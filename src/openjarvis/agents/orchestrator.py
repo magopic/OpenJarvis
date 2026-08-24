@@ -34,6 +34,10 @@ from openjarvis.agents.proactive_insight import (
     render_tool_execution_integrity,
     should_activate_proactive_analysis,
 )
+from openjarvis.governed_actions.runtime_hook import (
+    detect_and_apply_runtime_approval,
+    render_governed_action_event,
+)
 from openjarvis.core.events import EventBus
 from openjarvis.core.registry import AgentRegistry
 from openjarvis.core.types import Message, Role, ToolCall, ToolResult
@@ -368,6 +372,20 @@ class OrchestratorAgent(ToolUsingAgent):
             )
         )
         messages.append(Message(role=Role.USER, content=render_tool_execution_integrity([])))
+
+        # FASE 4P.3 STEP 10/13/19/20: runtime-only approval detection, on
+        # the ORIGINAL user input, before any generation this turn. The
+        # model is never in this call chain -- if the input is an exact
+        # affirmative phrase AND exactly one governed action is pending
+        # this principal's approval, the runtime itself approves and
+        # executes it here, in pure Python, before the model ever
+        # responds. Zero or multiple pending actions: nothing is
+        # approved (ambiguity is surfaced structurally instead). See
+        # governed_actions/runtime_hook.py.
+        governed_event = detect_and_apply_runtime_approval(input)
+        governed_event_block = render_governed_action_event(governed_event)
+        if governed_event_block:
+            messages.append(Message(role=Role.USER, content=governed_event_block))
 
         # Get OpenAI-format tool definitions. FASE 4L.2C: route the OPS
         # Bridge dynamic tool subset per-turn instead of serializing every

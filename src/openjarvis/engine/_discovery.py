@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Tuple
 
 from openjarvis.core.config import JarvisConfig
 from openjarvis.core.registry import EngineRegistry
-from openjarvis.engine._base import InferenceEngine
+from openjarvis.engine._base import EngineConnectionError, InferenceEngine
 
 logger = logging.getLogger(__name__)
 
@@ -176,17 +176,68 @@ def get_engine(
     engine" message (see #532). When *model* is ``None`` selection stays
     model-agnostic (unchanged behaviour).
 
-    Returns ``(key, engine_instance)`` or ``None`` if no engine is available.
+    Returns ``(key, engine_instance)``, or ``None`` if no engine is
+    available for a request that named no specific model, or named an
+    engine key without a specific model (see FASE 4P.3A STEP 4 -- this is
+    #73's fix, deliberately preserved: "I want cloud/local/whatever's
+    running" with no model opinion still falls back to any healthy
+    engine rather than hard-failing).
+
+    FASE 4P.3A STEP 3: when *engine_key* AND *model* are BOTH given
+    together -- the exact shape of an explicit ``--engine cloud --model
+    claude-sonnet-4-6``, i.e. a request for one SPECIFIC model via one
+    SPECIFIC engine -- that pairing is authoritative. It either succeeds,
+    or this raises ``EngineConnectionError`` with the concrete reason; it
+    never silently substitutes a different engine/model for this exact
+    pairing. Before this fix, a cloud engine that failed its health check
+    (e.g. the ``anthropic`` package missing) fell through to whatever
+    ``config.engine.default`` or full discovery found next — a local
+    engine that, by design (``InferenceEngine.can_serve()``'s documented
+    default of ``True`` for local engines, since "can serve this model
+    id" and "this model is actually installed" are different concerns),
+    claimed it could serve the requested cloud model name and then
+    generated with a completely different, silently-substituted local
+    model. That base-class default is correct for undirected/auto
+    selection (including engine-only, model-unopinionated requests, #73's
+    case); it is exactly what makes an unchecked engine+model PAIR
+    dangerous, which is what this fixes -- deliberately scoped no wider
+    than that, so #73's own fallback behavior stays intact.
     """
 
     def _usable(engine: InferenceEngine) -> bool:
         return engine.health() and (model is None or engine.can_serve(model))
 
-    # Build an ordered list of keys to try, then fall back to full discovery.
+    if engine_key and model:
+        if not EngineRegistry.contains(engine_key):
+            raise EngineConnectionError(
+                f"Requested engine {engine_key!r} is not a registered engine."
+            )
+        try:
+            engine = _make_engine(engine_key, config)
+        except Exception as exc:
+            raise EngineConnectionError(
+                f"Requested engine {engine_key!r} could not be constructed: {exc}"
+            ) from exc
+        if not engine.health():
+            raise EngineConnectionError(
+                f"Requested engine {engine_key!r} is not usable (health check "
+                f"failed) for the explicitly requested model {model!r}. "
+                f"Refusing to silently substitute a different engine/model."
+            )
+        if not engine.can_serve(model):
+            raise EngineConnectionError(
+                f"Requested engine {engine_key!r} cannot serve model {model!r}. "
+                f"Refusing to silently substitute a different engine/model."
+            )
+        return (engine_key, engine)
+
+    # engine_key without a specific model (#73), or no engine_key at all:
+    # auto/default selection with fallback, unchanged behaviour -- try
+    # engine_key (if given) then the configured default, in order, then
+    # fall back to full discovery.
     keys_to_try: list[str] = []
     if engine_key:
         keys_to_try.append(engine_key)
-
     default_key = config.engine.default
     if default_key and default_key not in keys_to_try:
         keys_to_try.append(default_key)

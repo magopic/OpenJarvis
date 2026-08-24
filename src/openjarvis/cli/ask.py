@@ -839,7 +839,17 @@ def ask(
     # -m flag or the configured default; when neither is set we leave it None
     # and a model is chosen per-engine below.
     selection_model = model_name or config.intelligence.default_model or None
-    resolved = get_engine(config, effective_engine_key, model=selection_model)
+    try:
+        resolved = get_engine(config, effective_engine_key, model=selection_model)
+    except EngineConnectionError as exc:
+        # FASE 4P.3A STEP 3: an explicitly requested engine (--engine or a
+        # configured intelligence.preferred_engine) failed its own health/
+        # can_serve check. get_engine() no longer silently substitutes a
+        # different engine for this case -- surface it plainly instead of
+        # generating with a silently-swapped model.
+        console.print(f"[red bold]Engine error:[/red bold] {exc}")
+        console.print(hint_no_engine())
+        sys.exit(1)
     if resolved is None:
         console.print(
             "[red bold]No inference engine available.[/red bold]\n\n"

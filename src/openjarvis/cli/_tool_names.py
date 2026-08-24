@@ -74,6 +74,21 @@ _MONITORING_TOOL_IDS = (
 # surface, no execution capability.
 _MAIA_MANAGE_TOOL_IDS = ("maia_manage",)
 
+# FASE 4P.3: the governed-action model-facing surface. Deliberately does
+# NOT include any approve/execute tool -- those exist only as
+# runtime-only GovernedActionService methods, never as
+# @ToolRegistry-registered, model-callable tools (see STEP 11's audit in
+# tools/governed_action_tools.py). prepare/request_approval only ever
+# advance PROPOSED -> PENDING_APPROVAL; nothing here can move an action
+# past that point.
+_GOVERNED_ACTION_TOOL_IDS = (
+    "maia_actions_list",
+    "maia_action_get",
+    "maia_action_prepare",
+    "maia_action_request_approval",
+    "maia_action_reject",
+)
+
 
 def _normalize_tool_names(value: Any) -> list[str]:
     """Normalize configured tool names from string or list-like values."""
@@ -146,5 +161,9 @@ def resolve_tool_names(
     for mm_id in _MAIA_MANAGE_TOOL_IDS:
         if mm_id not in names:
             names.append(mm_id)
+
+    for ga_id in _GOVERNED_ACTION_TOOL_IDS:
+        if ga_id not in names:
+            names.append(ga_id)
 
     return names

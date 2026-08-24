@@ -57,7 +57,13 @@ inference-mlx = ["mlx-lm>=0.31.1; sys_platform == 'darwin'"]
 inference-vllm = ["vllm>=0.16.0"]
 inference-cloud = [
     "openai>=1.30",
-    "anthropic>=0.30",
+    # Upper bound: engine/cloud.py's CloudEngine calls
+    # self._anthropic_client.messages.create/stream() with `temperature` as
+    # a top-level kwarg -- the pre-1.0 SDK shape. anthropic 1.x removed that
+    # signature (confirmed live, FASE 4P.3A: "Messages.create() got an
+    # unexpected keyword argument 'temperature'"). Bound until cloud.py is
+    # migrated to the 1.x calling convention.
+    "anthropic>=0.30,<1.0",
 ]
 inference-google = [
     "google-genai>=1.0",
