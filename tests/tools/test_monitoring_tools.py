@@ -152,8 +152,17 @@ class TestNotificationTools:
             )
 
         monkeypatch.setattr(pit.ProactiveAnalyzeTool, "_call_ops", fake_call_ops)
+        # FASE 4Q.3: the notification tools now resolve the REAL runtime
+        # principal internally (never a tool argument) -- pin it here so
+        # the monitor created directly via svc.create_monitor() (bypassing
+        # MonitorCreateTool, which is what normally binds this) matches
+        # what the read-side tools will filter by.
+        import openjarvis.second_brain.identity as identity_mod
+
+        monkeypatch.setattr(identity_mod, "resolve_runtime_principal", lambda: "test-principal")
+
         svc = _svc()
-        mon = svc.create_monitor("x", {"ops_capability": "ops.production.get_kpi"})
+        mon = svc.create_monitor("x", {"ops_capability": "ops.production.get_kpi"}, principal="test-principal")
         svc.run_cycle(mon.id)
 
         listed = NotificationsListTool(service=svc).execute()

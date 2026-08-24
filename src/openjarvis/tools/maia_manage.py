@@ -45,7 +45,9 @@ OP_MONITOR_ENABLE = "MONITOR_ENABLE"
 OP_MONITOR_DISABLE = "MONITOR_DISABLE"
 OP_MONITOR_RUN_NOW = "MONITOR_RUN_NOW"
 OP_NOTIFICATION_LIST = "NOTIFICATION_LIST"
+OP_NOTIFICATION_UNREAD_COUNT = "NOTIFICATION_UNREAD_COUNT"
 OP_NOTIFICATION_GET = "NOTIFICATION_GET"
+OP_NOTIFICATION_MARK_READ = "NOTIFICATION_MARK_READ"
 OP_NOTIFICATION_ACKNOWLEDGE = "NOTIFICATION_ACKNOWLEDGE"
 
 _ALL_OPERATIONS = (
@@ -61,7 +63,9 @@ _ALL_OPERATIONS = (
     OP_MONITOR_DISABLE,
     OP_MONITOR_RUN_NOW,
     OP_NOTIFICATION_LIST,
+    OP_NOTIFICATION_UNREAD_COUNT,
     OP_NOTIFICATION_GET,
+    OP_NOTIFICATION_MARK_READ,
     OP_NOTIFICATION_ACKNOWLEDGE,
 )
 
@@ -113,8 +117,14 @@ class MaiaManageTool(BaseTool):
                     "name": {"type": "string", "description": "MONITOR_CREATE"},
                     "cadence": {"type": "string", "description": "MONITOR_CREATE (HOURLY/DAILY/MANUAL)"},
                     "enabled": {"type": "boolean", "description": "MONITOR_LIST filter"},
-                    "notification_id": {"type": "string", "description": "NOTIFICATION_GET / NOTIFICATION_ACKNOWLEDGE"},
+                    "notification_id": {
+                        "type": "string",
+                        "description": "NOTIFICATION_GET / NOTIFICATION_MARK_READ / NOTIFICATION_ACKNOWLEDGE",
+                    },
                     "acknowledged": {"type": "boolean", "description": "NOTIFICATION_LIST filter"},
+                    "unread_only": {"type": "boolean", "description": "NOTIFICATION_LIST filter"},
+                    "severity": {"type": "string", "description": "NOTIFICATION_LIST filter"},
+                    "limit": {"type": "integer", "description": "NOTIFICATION_LIST filter"},
                 },
                 "required": ["operation"],
             },
@@ -252,8 +262,18 @@ def _op_notification_list(params: Dict[str, Any]) -> ToolResult:
     from openjarvis.tools.monitoring_tools import NotificationsListTool
 
     return NotificationsListTool().execute(
-        monitor_id=params.get("monitor_id"), acknowledged=params.get("acknowledged")
+        monitor_id=params.get("monitor_id"),
+        acknowledged=params.get("acknowledged"),
+        unread_only=params.get("unread_only"),
+        severity=params.get("severity"),
+        limit=params.get("limit"),
     )
+
+
+def _op_notification_unread_count(params: Dict[str, Any]) -> ToolResult:
+    from openjarvis.tools.monitoring_tools import NotificationsUnreadCountTool
+
+    return NotificationsUnreadCountTool().execute()
 
 
 def _op_notification_get(params: Dict[str, Any]) -> ToolResult:
@@ -263,6 +283,15 @@ def _op_notification_get(params: Dict[str, Any]) -> ToolResult:
     from openjarvis.tools.monitoring_tools import NotificationGetTool
 
     return NotificationGetTool().execute(notification_id=notification_id)
+
+
+def _op_notification_mark_read(params: Dict[str, Any]) -> ToolResult:
+    notification_id = _require(params, "notification_id")
+    if notification_id is None:
+        return _missing_arg_result(OP_NOTIFICATION_MARK_READ, "notification_id")
+    from openjarvis.tools.monitoring_tools import NotificationMarkReadTool
+
+    return NotificationMarkReadTool().execute(notification_id=notification_id)
 
 
 def _op_notification_acknowledge(params: Dict[str, Any]) -> ToolResult:
@@ -287,7 +316,9 @@ _HANDLERS = {
     OP_MONITOR_DISABLE: _op_monitor_disable,
     OP_MONITOR_RUN_NOW: _op_monitor_run_now,
     OP_NOTIFICATION_LIST: _op_notification_list,
+    OP_NOTIFICATION_UNREAD_COUNT: _op_notification_unread_count,
     OP_NOTIFICATION_GET: _op_notification_get,
+    OP_NOTIFICATION_MARK_READ: _op_notification_mark_read,
     OP_NOTIFICATION_ACKNOWLEDGE: _op_notification_acknowledge,
 }
 

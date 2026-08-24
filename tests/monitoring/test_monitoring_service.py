@@ -175,11 +175,11 @@ class TestMonitorLifecycleRun:
                 evidence=[],
             )
 
-        n1 = svc._diff_and_notify(mon.id, [_insight("WARNING", "MEDIUM")])
+        n1 = svc._diff_and_notify(mon, [_insight("WARNING", "MEDIUM")])
         assert [x.transition for x in n1] == [TRANSITION_NEW]
-        n2 = svc._diff_and_notify(mon.id, [_insight("WARNING", "MEDIUM")])
+        n2 = svc._diff_and_notify(mon, [_insight("WARNING", "MEDIUM")])
         assert n2 == []  # UNCHANGED, no notification
-        n3 = svc._diff_and_notify(mon.id, [_insight("CRITICAL", "HIGH")])
+        n3 = svc._diff_and_notify(mon, [_insight("CRITICAL", "HIGH")])
         assert [x.transition for x in n3] == [TRANSITION_CHANGED]
 
     def test_g_issue_disappears_resolved(self, monkeypatch):
@@ -368,10 +368,10 @@ class TestNotifications:
         svc = _svc()
         mon = svc.create_monitor("x", {"ops_capability": "ops.production.get_kpi"})
         run, notifications = svc.run_cycle(mon.id)
-        n = svc.acknowledge_notification(notifications[0].id)
+        n = svc.acknowledge_notification(notifications[0].id, principal=mon.principal)
         assert n.acknowledged is True
         assert n.acknowledged_at is not None
-        fetched = svc.get_notification(notifications[0].id)
+        fetched = svc.get_notification(notifications[0].id, principal=mon.principal)
         assert fetched.acknowledged is True
 
     def test_unchanged_never_creates_notification_even_across_many_cycles(self, monkeypatch):
@@ -382,7 +382,7 @@ class TestNotifications:
         for _ in range(5):
             _, notifications = svc.run_cycle(mon.id)
             assert notifications == []
-        assert len(svc.list_notifications(monitor_id=mon.id)) == 1  # only the original NEW
+        assert len(svc.list_notifications(principal=mon.principal, monitor_id=mon.id)) == 1  # only the original NEW
 
 
 class TestPersistence:
@@ -400,7 +400,7 @@ class TestPersistence:
         mon_again = svc2.get_monitor(mon.id)
         assert mon_again is not None
         assert mon_again.last_run_at is not None
-        notifications_again = svc2.list_notifications(monitor_id=mon.id)
+        notifications_again = svc2.list_notifications(principal=mon.principal, monitor_id=mon.id)
         assert len(notifications_again) == 1
 
     def test_s_cadence_bounded(self):

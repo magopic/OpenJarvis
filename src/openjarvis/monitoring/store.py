@@ -100,6 +100,29 @@ class MonitorStore:
         self._conn.execute(_CREATE_RUN_LOCKS_TABLE)
         self._conn.commit()
 
+        # FASE 4Q.3 -- additive migrations for the notification attention
+        # layer (principal isolation, promoted presentation fields, the
+        # UNREAD/READ distinction). Mirrors the exact pattern already
+        # established in agents/manager.py: try each ADD COLUMN, swallow
+        # "duplicate column" on every db that already has it. Real
+        # monitoring.db has zero notification rows today (the cert
+        # monitor has never run a cycle), so there is nothing to backfill.
+        _MIGRATIONS = [
+            "ALTER TABLE monitor_notifications ADD COLUMN principal TEXT",
+            "ALTER TABLE monitor_notifications ADD COLUMN source_type TEXT DEFAULT 'monitor'",
+            "ALTER TABLE monitor_notifications ADD COLUMN source_id TEXT",
+            "ALTER TABLE monitor_notifications ADD COLUMN severity TEXT",
+            "ALTER TABLE monitor_notifications ADD COLUMN title TEXT",
+            "ALTER TABLE monitor_notifications ADD COLUMN summary TEXT",
+            "ALTER TABLE monitor_notifications ADD COLUMN read_at TEXT",
+        ]
+        for migration in _MIGRATIONS:
+            try:
+                self._conn.execute(migration)
+            except sqlite3.OperationalError:
+                pass  # column already exists
+        self._conn.commit()
+
     # -- Run concurrency guard (FASE 4Q.2 STEP 11) ------------------------
 
     def try_claim_run(self, monitor_id: str, run_id: str, stale_after_seconds: float) -> bool:
@@ -250,8 +273,9 @@ class MonitorStore:
         self._conn.execute(
             """INSERT OR REPLACE INTO monitor_notifications
                (id, monitor_id, fingerprint, transition, insight_snapshot,
-                created_at, acknowledged, acknowledged_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                created_at, acknowledged, acknowledged_at, principal,
+                source_type, source_id, severity, title, summary, read_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 n["id"],
                 n["monitor_id"],
@@ -261,6 +285,13 @@ class MonitorStore:
                 n["created_at"],
                 int(bool(n.get("acknowledged", False))),
                 n.get("acknowledged_at"),
+                n.get("principal"),
+                n.get("source_type", "monitor"),
+                n.get("source_id") or n["monitor_id"],
+                n.get("severity"),
+                n.get("title"),
+                n.get("summary"),
+                n.get("read_at"),
             ),
         )
         self._conn.commit()
@@ -271,20 +302,54 @@ class MonitorStore:
         ).fetchone()
         return self._notification_row_to_dict(row) if row else None
 
+    def mark_notification_read(self, notification_id: str, read_at: str) -> None:
+        """Idempotent -- only sets read_at if it isn't already set, so a
+        repeated mark-read never overwrites the original read timestamp."""
+        self._conn.execute(
+            "UPDATE monitor_notifications SET read_at = ? WHERE id = ? AND read_at IS NULL",
+            (read_at, notification_id),
+        )
+        self._conn.commit()
+
     def list_notifications(
-        self, *, monitor_id: Optional[str] = None, acknowledged: Optional[bool] = None
+        self,
+        *,
+        principal: Optional[str] = None,
+        monitor_id: Optional[str] = None,
+        acknowledged: Optional[bool] = None,
+        unread_only: bool = False,
+        severity: Optional[str] = None,
+        limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         query = "SELECT * FROM monitor_notifications WHERE 1=1"
         params: List[Any] = []
+        if principal is not None:
+            query += " AND principal = ?"
+            params.append(principal)
         if monitor_id is not None:
             query += " AND monitor_id = ?"
             params.append(monitor_id)
         if acknowledged is not None:
             query += " AND acknowledged = ?"
             params.append(int(acknowledged))
+        if unread_only:
+            query += " AND read_at IS NULL"
+        if severity is not None:
+            query += " AND severity = ?"
+            params.append(severity)
         query += " ORDER BY created_at DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(int(limit))
         rows = self._conn.execute(query, params).fetchall()
         return [self._notification_row_to_dict(r) for r in rows]
+
+    def count_unread_notifications(self, principal: str) -> int:
+        row = self._conn.execute(
+            "SELECT COUNT(*) AS n FROM monitor_notifications WHERE principal = ? AND read_at IS NULL",
+            (principal,),
+        ).fetchone()
+        return int(row["n"]) if row else 0
 
     # -- Lifecycle -------------------------------------------------------
 

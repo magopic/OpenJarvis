@@ -292,25 +292,77 @@ class MonitorService:
     # -- Notifications -------------------------------------------------------
 
     def list_notifications(
-        self, *, monitor_id: Optional[str] = None, acknowledged: Optional[bool] = None
+        self,
+        *,
+        principal: str,
+        monitor_id: Optional[str] = None,
+        acknowledged: Optional[bool] = None,
+        unread_only: bool = False,
+        severity: Optional[str] = None,
+        limit: Optional[int] = None,
     ) -> List[Notification]:
+        """FASE 4Q.3 STEP 4: *principal* is required, not optional -- there
+        is no "all principals" mode. This method filters by whatever
+        principal it's given; it does not authenticate it -- the
+        model-facing tools that call this always source it from
+        resolve_runtime_principal(), never from a tool argument, which is
+        the actual isolation guarantee."""
         return [
             Notification.from_dict(d)
-            for d in self._store.list_notifications(monitor_id=monitor_id, acknowledged=acknowledged)
+            for d in self._store.list_notifications(
+                principal=principal,
+                monitor_id=monitor_id,
+                acknowledged=acknowledged,
+                unread_only=unread_only,
+                severity=severity,
+                limit=limit,
+            )
         ]
 
-    def get_notification(self, notification_id: str) -> Optional[Notification]:
+    def get_notification(self, notification_id: str, *, principal: str) -> Optional[Notification]:
         d = self._store.get_notification(notification_id)
-        return Notification.from_dict(d) if d else None
+        if d is None:
+            return None
+        n = Notification.from_dict(d)
+        if n.principal != principal:
+            # Fail closed: a cross-principal lookup looks IDENTICAL to a
+            # genuinely missing id -- never distinguishes "exists but
+            # isn't yours" from "doesn't exist" (that distinction would
+            # itself be an information leak).
+            return None
+        return n
 
-    def acknowledge_notification(self, notification_id: str) -> Notification:
-        n = self.get_notification(notification_id)
+    def mark_notification_read(self, notification_id: str, *, principal: str) -> Notification:
+        """Idempotent -- a second call is a no-op (store-level guard
+        already refuses to overwrite an existing read_at)."""
+        n = self.get_notification(notification_id, principal=principal)
         if n is None:
             raise KeyError(f"Notification not found: {notification_id}")
-        n.acknowledged = True
-        n.acknowledged_at = _now_iso()
-        self._store.save_notification(n.to_dict())
+        if n.read_at is None:
+            self._store.mark_notification_read(notification_id, _now_iso())
+            n = self.get_notification(notification_id, principal=principal)
         return n
+
+    def acknowledge_notification(self, notification_id: str, *, principal: str) -> Notification:
+        """Idempotent -- a second call returns the same already-
+        acknowledged state rather than overwriting acknowledged_at.
+        Setting read_at alongside acknowledged_at (if not already read) is
+        deliberate: acknowledging implies having seen it, and without
+        this an acknowledged-but-technically-unread row would incorrectly
+        still count toward the unread total."""
+        n = self.get_notification(notification_id, principal=principal)
+        if n is None:
+            raise KeyError(f"Notification not found: {notification_id}")
+        if n.acknowledged_at is None:
+            n.acknowledged = True
+            n.acknowledged_at = _now_iso()
+            if n.read_at is None:
+                n.read_at = n.acknowledged_at
+            self._store.save_notification(n.to_dict())
+        return n
+
+    def count_unread_notifications(self, *, principal: str) -> int:
+        return self._store.count_unread_notifications(principal)
 
     # -- The cycle (STEP 7) ---------------------------------------------
 
@@ -376,7 +428,7 @@ class MonitorService:
             insights = ProactiveReasoningService(detectors=detectors).analyze(tool_results, evidence)
         run.insights_generated = len(insights)
 
-        notifications = self._diff_and_notify(monitor_id, insights)
+        notifications = self._diff_and_notify(monitor, insights)
 
         run.errors = collection_errors
         if collection_errors and tool_results:
@@ -464,10 +516,11 @@ class MonitorService:
 
         return results, errors
 
-    def _diff_and_notify(self, monitor_id: str, insights: List[ProactiveInsight]) -> List[Notification]:
+    def _diff_and_notify(self, monitor: MonitorDefinition, insights: List[ProactiveInsight]) -> List[Notification]:
         """STEP 4/5: deterministic fingerprint = insight.id (already a
         SHA256 of detector name + governed fields -- see
         proactive_insight.py::_stable_id -- never generated prose)."""
+        monitor_id = monitor.id
         prior_state = self._store.get_issue_state(monitor_id)
         current_fingerprints = {i.id for i in insights}
         now = _now_iso()
@@ -501,7 +554,7 @@ class MonitorService:
             )
             if transition in _NOTIFYING_TRANSITIONS:
                 notifications.append(
-                    self._create_notification(monitor_id, fp, transition, _insight_snapshot(insight), now)
+                    self._create_notification(monitor, fp, transition, _insight_snapshot(insight), now)
                 )
 
         for fp, prior in prior_state.items():
@@ -517,21 +570,36 @@ class MonitorService:
                     resolved_at=now,
                 )
                 notifications.append(
-                    self._create_notification(monitor_id, fp, TRANSITION_RESOLVED, {"id": fp, "resolved": True}, now)
+                    self._create_notification(
+                        monitor, fp, TRANSITION_RESOLVED, {"id": fp, "resolved": True}, now
+                    )
                 )
 
         return notifications
 
     def _create_notification(
-        self, monitor_id: str, fingerprint: str, transition: str, snapshot: Dict[str, Any], now: str
+        self, monitor: MonitorDefinition, fingerprint: str, transition: str, snapshot: Dict[str, Any], now: str
     ) -> Notification:
+        # FASE 4Q.3: severity/title/summary are PROMOTED from the raw
+        # insight snapshot into real, queryable fields -- the snapshot
+        # itself (raw evidence) is kept verbatim, untouched, as
+        # insight_snapshot. A RESOLVED transition's synthetic snapshot
+        # ({"id": fp, "resolved": True}) has no title/summary/severity of
+        # its own; that's honest -- there is no fabricated presentation
+        # text invented here for it.
         n = Notification(
             id=uuid.uuid4().hex[:16],
-            monitor_id=monitor_id,
+            monitor_id=monitor.id,
             fingerprint=fingerprint,
             transition=transition,
             insight_snapshot=snapshot,
             created_at=now,
+            principal=monitor.principal,
+            source_type="monitor",
+            source_id=monitor.id,
+            severity=snapshot.get("severity"),
+            title=snapshot.get("title"),
+            summary=snapshot.get("summary"),
         )
         self._store.save_notification(n.to_dict())
         return n

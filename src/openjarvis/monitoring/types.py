@@ -154,10 +154,26 @@ class MonitorRun:
         )
 
 
+STATUS_UNREAD = "UNREAD"
+STATUS_READ = "READ"
+STATUS_ACKNOWLEDGED = "ACKNOWLEDGED"
+
+
 @dataclass
 class Notification:
     """An internal (never external) record surfaced only on a real
-    transition (NEW/CHANGED/RESOLVED/REOPENED). STEP 6."""
+    transition (NEW/CHANGED/RESOLVED/REOPENED). STEP 6.
+
+    FASE 4Q.3: extends the original FASE 4P.2 shape with the attention
+    layer -- principal (structural isolation, never model-settable),
+    source_type/source_id (generic -- V1 only ever has "monitor", but
+    named for a future non-monitor event source without a schema
+    change), and severity/title/summary promoted to real, queryable
+    fields (extracted from insight_snapshot at creation time -- the raw
+    evidence stays in insight_snapshot, untouched, kept separate from
+    this presentation text per STEP 2's own instruction). read_at is new
+    -- UNREAD/READ is now distinct from ACKNOWLEDGED, where it wasn't
+    before."""
 
     id: str
     monitor_id: str
@@ -167,6 +183,24 @@ class Notification:
     created_at: str
     acknowledged: bool = False
     acknowledged_at: Optional[str] = None
+    principal: Optional[str] = None
+    source_type: str = "monitor"
+    source_id: Optional[str] = None
+    severity: Optional[str] = None
+    title: Optional[str] = None
+    summary: Optional[str] = None
+    read_at: Optional[str] = None
+
+    @property
+    def status(self) -> str:
+        """Computed, never persisted separately -- a single source of
+        truth (read_at/acknowledged_at) can't drift out of sync with a
+        redundant stored status column."""
+        if self.acknowledged_at is not None:
+            return STATUS_ACKNOWLEDGED
+        if self.read_at is not None:
+            return STATUS_READ
+        return STATUS_UNREAD
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -178,6 +212,14 @@ class Notification:
             "created_at": self.created_at,
             "acknowledged": self.acknowledged,
             "acknowledged_at": self.acknowledged_at,
+            "principal": self.principal,
+            "source_type": self.source_type,
+            "source_id": self.source_id,
+            "severity": self.severity,
+            "title": self.title,
+            "summary": self.summary,
+            "read_at": self.read_at,
+            "status": self.status,
         }
 
     @classmethod
@@ -191,6 +233,13 @@ class Notification:
             created_at=d["created_at"],
             acknowledged=bool(d.get("acknowledged", False)),
             acknowledged_at=d.get("acknowledged_at"),
+            principal=d.get("principal"),
+            source_type=d.get("source_type") or "monitor",
+            source_id=d.get("source_id") or d.get("monitor_id"),
+            severity=d.get("severity"),
+            title=d.get("title"),
+            summary=d.get("summary"),
+            read_at=d.get("read_at"),
         )
 
 
@@ -214,6 +263,9 @@ __all__ = [
     "TRANSITION_RESOLVED",
     "TRANSITION_REOPENED",
     "_NOTIFYING_TRANSITIONS",
+    "STATUS_UNREAD",
+    "STATUS_READ",
+    "STATUS_ACKNOWLEDGED",
     "MonitorDefinition",
     "MonitorRun",
     "Notification",

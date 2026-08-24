@@ -66,12 +66,36 @@ def _notification_full(n: Any) -> Dict[str, Any]:
     return {
         "id": n.id,
         "monitor_id": n.monitor_id,
+        "source_type": n.source_type,
+        "source_id": n.source_id,
         "fingerprint": n.fingerprint,
         "transition": n.transition,
+        "severity": n.severity,
+        "title": n.title,
+        "summary": n.summary,
         "insight_snapshot": n.insight_snapshot,
         "created_at": n.created_at,
+        "read_at": n.read_at,
         "acknowledged": n.acknowledged,
         "acknowledged_at": n.acknowledged_at,
+        "status": n.status,
+    }
+
+
+def _notification_brief(n: Any) -> Dict[str, Any]:
+    """FASE 4Q.3: a compact shape for list views -- omits insight_snapshot
+    (the raw evidence blob) so a natural 'do I have notifications?' list
+    doesn't flood context with every insight's full detail; get_notification
+    still returns the full shape including insight_snapshot."""
+    return {
+        "id": n.id,
+        "monitor_id": n.monitor_id,
+        "transition": n.transition,
+        "severity": n.severity,
+        "title": n.title,
+        "summary": n.summary,
+        "created_at": n.created_at,
+        "status": n.status,
     }
 
 
@@ -193,9 +217,23 @@ class MonitorCreateTool(BaseTool):
                 ),
                 success=False,
             )
+        # FASE 4Q.3: bind the monitor to the REAL creating identity, never
+        # the generic "monitor:default" MonitorService.create_monitor()'s
+        # own signature would otherwise leave in place. This is what makes
+        # notification principal isolation meaningful -- without it every
+        # monitor created via this tool would share one identity, and
+        # isolating notifications "by principal" would isolate nothing.
+        # Same certified, non-model-settable mechanism Second Brain
+        # already uses -- no principal parameter exists on this tool's
+        # spec for the model to override.
+        from openjarvis.second_brain.identity import resolve_runtime_principal
+
         try:
             mon = self._service.create_monitor(
-                name, source_requirements, cadence=params.get("cadence", "MANUAL")
+                name,
+                source_requirements,
+                cadence=params.get("cadence", "MANUAL"),
+                principal=resolve_runtime_principal(),
             )
         except ValueError as exc:
             return ToolResult(tool_name="maia_monitor_create", content=str(exc), success=False)
@@ -336,26 +374,72 @@ class NotificationsListTool(BaseTool):
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="maia_notifications_list",
-            description="List internal monitor notifications, optionally filtered by monitor or acknowledged state.",
+            description=(
+                "List internal notifications for the current user -- optionally "
+                "filtered by monitor, acknowledged state, severity, or unread_only. "
+                "These are stored internally only; nothing is pushed or delivered "
+                "anywhere automatically -- this tool is how you actually find out "
+                "whether anything is waiting for attention. Never claim the user "
+                "will be notified elsewhere; only what this list actually returns."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
                     "monitor_id": {"type": "string"},
                     "acknowledged": {"type": "boolean"},
+                    "unread_only": {"type": "boolean", "description": "Only notifications not yet marked read."},
+                    "severity": {"type": "string"},
+                    "limit": {"type": "integer"},
                 },
                 "required": [],
             },
         )
 
     def execute(self, **params: Any) -> ToolResult:
+        # FASE 4Q.3 STEP 4: principal always comes from the real runtime
+        # identity -- there is deliberately no "principal" parameter in
+        # this tool's own schema for the model to supply or override.
+        from openjarvis.second_brain.identity import resolve_runtime_principal
+
         notifications = self._service.list_notifications(
-            monitor_id=params.get("monitor_id"), acknowledged=params.get("acknowledged")
+            principal=resolve_runtime_principal(),
+            monitor_id=params.get("monitor_id"),
+            acknowledged=params.get("acknowledged"),
+            unread_only=bool(params.get("unread_only", False)),
+            severity=params.get("severity"),
+            limit=params.get("limit"),
         )
         return ToolResult(
             tool_name="maia_notifications_list",
-            content=json.dumps([_notification_full(n) for n in notifications]),
+            content=json.dumps([_notification_brief(n) for n in notifications]),
             success=True,
             metadata={"num_notifications": len(notifications)},
+        )
+
+
+@ToolRegistry.register("maia_notifications_unread_count")
+class NotificationsUnreadCountTool(BaseTool):
+    tool_id = "maia_notifications_unread_count"
+
+    def __init__(self, service: Optional[MonitorService] = None) -> None:
+        self._service = service or MonitorService()
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="maia_notifications_unread_count",
+            description="How many of the current user's notifications are unread right now.",
+            parameters={"type": "object", "properties": {}, "required": []},
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        from openjarvis.second_brain.identity import resolve_runtime_principal
+
+        count = self._service.count_unread_notifications(principal=resolve_runtime_principal())
+        return ToolResult(
+            tool_name="maia_notifications_unread_count",
+            content=json.dumps({"unread_count": count}),
+            success=True,
         )
 
 
@@ -370,7 +454,7 @@ class NotificationGetTool(BaseTool):
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="maia_notification_get",
-            description="Get full detail for one notification by id.",
+            description="Get full detail (including raw evidence) for one of the current user's notifications by id.",
             parameters={
                 "type": "object",
                 "properties": {"notification_id": {"type": "string"}},
@@ -379,10 +463,55 @@ class NotificationGetTool(BaseTool):
         )
 
     def execute(self, **params: Any) -> ToolResult:
-        n = self._service.get_notification(params.get("notification_id", ""))
+        from openjarvis.second_brain.identity import resolve_runtime_principal
+
+        n = self._service.get_notification(
+            params.get("notification_id", ""), principal=resolve_runtime_principal()
+        )
         if n is None:
+            # FASE 4Q.3 STEP 4: identical wording whether the id is
+            # genuinely unknown or belongs to a different principal --
+            # never confirms a notification exists that isn't this
+            # principal's to see.
             return ToolResult(tool_name="maia_notification_get", content="Notification not found.", success=False)
         return ToolResult(tool_name="maia_notification_get", content=json.dumps(_notification_full(n)), success=True)
+
+
+@ToolRegistry.register("maia_notification_mark_read")
+class NotificationMarkReadTool(BaseTool):
+    tool_id = "maia_notification_mark_read"
+
+    def __init__(self, service: Optional[MonitorService] = None) -> None:
+        self._service = service or MonitorService()
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="maia_notification_mark_read",
+            description=(
+                "Mark one of the current user's notifications as read -- purely "
+                "informational, distinct from acknowledging it. Does not resolve "
+                "anything and never implies any business action was taken."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {"notification_id": {"type": "string"}},
+                "required": ["notification_id"],
+            },
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        from openjarvis.second_brain.identity import resolve_runtime_principal
+
+        try:
+            n = self._service.mark_notification_read(
+                params.get("notification_id", ""), principal=resolve_runtime_principal()
+            )
+        except KeyError as exc:
+            return ToolResult(tool_name="maia_notification_mark_read", content=str(exc), success=False)
+        return ToolResult(
+            tool_name="maia_notification_mark_read", content=json.dumps(_notification_full(n)), success=True
+        )
 
 
 @ToolRegistry.register("maia_notification_acknowledge")
@@ -396,7 +525,15 @@ class NotificationAcknowledgeTool(BaseTool):
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="maia_notification_acknowledge",
-            description="Mark a notification as acknowledged (seen) -- does not resolve the underlying issue.",
+            description=(
+                "Mark one of the current user's notifications as acknowledged "
+                "(the user has explicitly seen and accepted it). This is strictly "
+                "informational -- it NEVER means the underlying issue was resolved, "
+                "a corrective action was taken, a governed action was approved, the "
+                "monitor itself was resolved, or any business/ERP system was "
+                "updated. Only ever say the notification was acknowledged, nothing "
+                "more."
+            ),
             parameters={
                 "type": "object",
                 "properties": {"notification_id": {"type": "string"}},
@@ -405,8 +542,12 @@ class NotificationAcknowledgeTool(BaseTool):
         )
 
     def execute(self, **params: Any) -> ToolResult:
+        from openjarvis.second_brain.identity import resolve_runtime_principal
+
         try:
-            n = self._service.acknowledge_notification(params.get("notification_id", ""))
+            n = self._service.acknowledge_notification(
+                params.get("notification_id", ""), principal=resolve_runtime_principal()
+            )
         except KeyError as exc:
             return ToolResult(tool_name="maia_notification_acknowledge", content=str(exc), success=False)
         return ToolResult(
@@ -422,6 +563,8 @@ __all__ = [
     "MonitorDisableTool",
     "MonitorRunNowTool",
     "NotificationsListTool",
+    "NotificationsUnreadCountTool",
     "NotificationGetTool",
+    "NotificationMarkReadTool",
     "NotificationAcknowledgeTool",
 ]

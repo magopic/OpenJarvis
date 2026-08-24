@@ -29,8 +29,25 @@ def _isolated_monitor_service(monkeypatch):
     """Every maia_manage MONITOR_*/NOTIFICATION_* handler constructs a
     fresh tool with service=None (defaulting to a real MonitorService).
     Point that default at an isolated store for every test in this file."""
+    # FASE 4Q.3: notification tools now resolve the REAL runtime principal
+    # internally (STEP 4 -- never a tool argument). Pin it to the exact
+    # same default MonitorService.create_monitor() already used
+    # ("monitor:default") so every existing test in this file -- most of
+    # which create monitors directly via the service, bypassing
+    # MonitorCreateTool's own principal binding -- keeps working without
+    # each one needing to know or care about principal isolation
+    # specifically (that gets its own dedicated tests below).
+    import openjarvis.second_brain.identity as identity_mod
+
+    monkeypatch.setattr(identity_mod, "resolve_runtime_principal", lambda: "monitor:default")
+
     svc = MonitorService(store=MonitorStore(tempfile.mktemp(suffix=".db")))
-    monkeypatch.setattr(mt, "MonitorService", lambda: svc)
+    # FASE 4Q.2 note (found while working on 4Q.3): MonitorCreateTool/
+    # MonitorEnableTool/MonitorDisableTool's bare default now calls
+    # MonitorService(scheduler=...), not MonitorService() -- accept and
+    # ignore any args/kwargs so every one of those still resolves to this
+    # same isolated instance regardless of which one constructs it.
+    monkeypatch.setattr(mt, "MonitorService", lambda *a, **kw: svc)
     return svc
 
 
