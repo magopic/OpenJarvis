@@ -28,6 +28,7 @@ from openjarvis.monitoring.types import (
     _CADENCE_SECONDS,
     _NOTIFYING_TRANSITIONS,
     CADENCE_MANUAL,
+    CADENCE_ONCE,
     ISSUE_STATE_ACTIVE,
     ISSUE_STATE_RESOLVED,
     MONITOR_STATUS_ACTIVE,
@@ -126,6 +127,7 @@ class MonitorService:
         bounds: Optional[Dict[str, Any]] = None,
         monitor_id: Optional[str] = None,
         enabled: bool = True,
+        run_at: Optional[str] = None,
     ) -> MonitorDefinition:
         if cadence not in VALID_CADENCES:
             raise ValueError(f"Invalid cadence {cadence!r}; must be one of {sorted(VALID_CADENCES)}")
@@ -136,6 +138,34 @@ class MonitorService:
             unknown = set(detector_scope) - valid_names
             if unknown:
                 raise ValueError(f"Unknown detector(s) in detector_scope: {sorted(unknown)}")
+        if cadence == CADENCE_ONCE:
+            if not run_at:
+                raise ValueError(
+                    "cadence='ONCE' requires run_at (an ISO 8601 datetime -- "
+                    "the specific future moment this one-time check should run)"
+                )
+            try:
+                _parsed = datetime.fromisoformat(run_at)
+            except ValueError as exc:
+                raise ValueError(f"run_at {run_at!r} is not a valid ISO 8601 datetime: {exc}") from exc
+            if _parsed.tzinfo is None:
+                raise ValueError(f"run_at {run_at!r} must include a UTC offset (e.g. '+00:00' or 'Z')")
+            # FASE 4Q.4A Fix B -- authoritative runtime clock, compared as
+            # timezone-aware datetime objects (never as raw ISO strings,
+            # which do not sort correctly across mixed UTC offsets). A
+            # live certification persisted run_at over a year in the past
+            # with no rejection anywhere in this path -- this is the
+            # single, deepest boundary every caller (MonitorCreateTool,
+            # maia_manage, any future caller) already funnels through.
+            _now = datetime.now(timezone.utc)
+            if _parsed <= _now:
+                raise ValueError(
+                    f"run_at {run_at!r} must be in the future (current time is "
+                    f"{_now.isoformat()}) -- a one-time check cannot be scheduled "
+                    "for a moment that has already passed"
+                )
+        elif run_at:
+            raise ValueError("run_at is only valid together with cadence='ONCE'")
 
         mon = MonitorDefinition(
             id=monitor_id or uuid.uuid4().hex[:16],
@@ -147,6 +177,7 @@ class MonitorService:
             principal=principal,
             created_at=_now_iso(),
             bounds=bounds or {"timeout_seconds": 30, "max_consecutive_failures": 5},
+            run_at=run_at,
         )
 
         if cadence != CADENCE_MANUAL and self._scheduler is not None and enabled:
@@ -161,16 +192,26 @@ class MonitorService:
         rather than creating a second one; only creates when genuinely
         missing. Shared by create_monitor, enable_monitor, and
         reconcile_scheduler_bindings so there is exactly one place that
-        decides how a monitor's ScheduledTask looks."""
+        decides how a monitor's ScheduledTask looks.
+
+        FASE 4Q.4A: CADENCE_ONCE binds to the scheduler's own already-
+        working schedule_type="once" (see scheduler/scheduler.py) using
+        the monitor's run_at as schedule_value, instead of the
+        interval-seconds mapping the two recurring cadences use."""
         if self._scheduler is None:
             return mon.scheduler_task_id
         task_id = mon.scheduler_task_id or f"monitor:{mon.id}"
         existing = self._scheduler.get_task(task_id)
         if existing is None:
+            if mon.cadence == CADENCE_ONCE:
+                schedule_type, schedule_value = "once", mon.run_at
+            else:
+                schedule_type = "interval"
+                schedule_value = str(_CADENCE_SECONDS[mon.cadence])
             task = self._scheduler.create_task(
                 prompt=f"{MONITOR_PROMPT_PREFIX}{mon.id}",
-                schedule_type="interval",
-                schedule_value=str(_CADENCE_SECONDS[mon.cadence]),
+                schedule_type=schedule_type,
+                schedule_value=schedule_value,
                 agent="monitor_check",
                 task_id=task_id,
             )

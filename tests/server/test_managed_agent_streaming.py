@@ -221,13 +221,24 @@ class TestBuildManagedSystemPrompt:
         # The agent's own template is carried into the assembled prompt.
         assert "Plain agent." in result
 
-    def test_matches_cli_builder_output(self, tmp_path):
+    def test_matches_cli_builder_output(self, tmp_path, monkeypatch):
         """Parity check: the helper produces exactly what a directly-
         constructed SystemPromptBuilder produces (same path the CLI uses),
         so streaming chat and `jarvis ask` assemble the prompt identically.
         """
+        from datetime import datetime, timezone
+
+        import openjarvis.prompt.builder as builder_mod
         from openjarvis.core.config import MemoryFilesConfig, SystemPromptConfig
         from openjarvis.prompt.builder import SystemPromptBuilder
+
+        # FASE 4Q.4A -- both builders now include the authoritative
+        # current-time section (genuinely time-dependent by design).
+        # Neither construction site here accepts an injected `now`, so
+        # pin the underlying clock for the duration of this parity check
+        # rather than comparing two independently-timestamped outputs.
+        fixed_now = datetime(2026, 8, 25, 12, 0, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr(builder_mod, "_default_now", lambda: fixed_now)
 
         app_config = SimpleNamespace(
             memory_files=MemoryFilesConfig(),

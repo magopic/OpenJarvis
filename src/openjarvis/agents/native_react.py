@@ -131,6 +131,7 @@ class NativeReActAgent(ToolUsingAgent):
         context: Optional[AgentContext] = None,
         **kwargs: Any,
     ) -> AgentResult:
+        self._reset_loop_guard_for_new_turn()
         self._emit_turn_start(input)
 
         # Build system prompt with rich tool descriptions

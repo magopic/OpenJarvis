@@ -11,8 +11,21 @@ from typing import Any, Dict, Optional
 
 from openjarvis.core.registry import ToolRegistry
 from openjarvis.core.types import ToolResult
+from openjarvis.monitoring.attention import build_attention_summary
 from openjarvis.monitoring.service import MonitorService, get_default_task_scheduler
-from openjarvis.monitoring.types import VALID_CADENCES
+from openjarvis.monitoring.types import (
+    CADENCE_DAILY,
+    CADENCE_HOURLY,
+    CADENCE_MANUAL,
+    CADENCE_ONCE,
+)
+
+# FASE 4Q.4A STEP 6 -- the only recurring cadences a model may name
+# directly on maia_monitor_create's new recurring_cadence field. ONCE and
+# MANUAL are deliberately excluded: ONCE is now implied structurally by
+# supplying run_at (never a label the model picks), and MANUAL is implied
+# by supplying neither field -- see MonitorCreateTool.execute().
+_RECURRING_CADENCES = frozenset({CADENCE_HOURLY, CADENCE_DAILY})
 from openjarvis.tools._stubs import BaseTool, ToolSpec
 
 
@@ -48,6 +61,7 @@ def _monitor_full(m: Any) -> Dict[str, Any]:
             "detector_scope": m.detector_scope,
             "principal": m.principal,
             "created_at": m.created_at,
+            "run_at": getattr(m, "run_at", None),
             "bounds": m.bounds,
             # FASE 4Q.1 claim-integrity review: structural, not narrated --
             # the model must see this directly rather than assume automatic
@@ -181,7 +195,48 @@ class MonitorCreateTool(BaseTool):
                 "maia_notifications_list) -- it is NEVER pushed or delivered into a "
                 "chat session automatically. Never tell the user they will be "
                 "notified 'here' or 'in this chat' -- they (or you, in a later turn) "
-                "must actively check for it."
+                "must actively check for it.\n\n"
+                "On a successful creation, the result's execution_note field is the "
+                "AUTHORITATIVE statement of scheduler-execution state -- reproduce "
+                "its meaning faithfully in your response; do not contradict, "
+                "reinterpret, weaken, strengthen, or replace it. When "
+                "scheduler_task_id is null, you MUST state that nothing will "
+                "execute the monitor automatically, and you MUST NOT say or imply "
+                "it 'will run', 'will check', 'will execute tomorrow', 'is "
+                "scheduled to run automatically', or any equivalent phrase -- even "
+                "though the monitor's own enabled/status fields read 'true'/"
+                "'active'. Those two fields describe only whether the monitor "
+                "DEFINITION is enabled/active -- never whether anything will "
+                "actually invoke it. scheduler_task_id (and execution_note derived "
+                "from it) is the sole authority on scheduler binding.\n\n"
+                "Scheduling is controlled by TWO separate, mutually exclusive "
+                "fields -- there is no generic 'cadence' parameter to choose "
+                "from. Decide which kind of check the user asked for, then "
+                "supply exactly ONE of these two (or neither):\n\n"
+                "- run_at: for a SINGLE future check ('controllalo domani', "
+                "'ricontrollalo lunedì alle 15', 'verificalo tra due ore', "
+                "'controllalo una volta domani'). Supply a full ISO 8601 "
+                "datetime with a UTC offset (e.g. '2026-08-26T09:00:00+00:00') "
+                "for the exact future moment requested -- compute the concrete "
+                "date/time yourself from the conversation's current date; never "
+                "pass a relative word like 'tomorrow' as the value itself, and "
+                "never supply recurring_cadence alongside it.\n\n"
+                "- recurring_cadence: for a check that repeats forever "
+                "('controllalo ogni giorno' / 'controllalo giornalmente' -> "
+                "'DAILY'; 'controllalo ogni ora' -> 'HOURLY'). Never supply "
+                "run_at alongside it.\n\n"
+                "- Neither field: a configuration-only monitor with no automatic "
+                "schedule at all ('salvalo ma non eseguirlo automaticamente').\n\n"
+                "This choice depends ONLY on the user's requested execution "
+                "timing -- never on this monitor's subject, name, query, or the "
+                "name of the capability/tool it checks. A monitor whose subject "
+                "is itself a 'daily attention summary' (e.g. built around "
+                "maia_daily_attention_summary, whose own name contains the word "
+                "'daily') still takes run_at (not recurring_cadence) if the user "
+                "asked for a one-time future check -- the word 'daily' appearing "
+                "in what is being checked does not make the check itself "
+                "recurring. If this call fails, quote its returned error text "
+                "verbatim to the user rather than guessing or inventing a reason."
             ),
             parameters={
                 "type": "object",
@@ -192,7 +247,22 @@ class MonitorCreateTool(BaseTool):
                     "second_brain_query": {"type": "string"},
                     "second_brain_domains": {"type": "array", "items": {"type": "string"}},
                     "document_query": {"type": "string"},
-                    "cadence": {"type": "string", "enum": sorted(VALID_CADENCES)},
+                    "run_at": {
+                        "type": "string",
+                        "description": (
+                            "For a single future execution ONLY: the exact ISO "
+                            "8601 datetime with UTC offset. Never combine with "
+                            "recurring_cadence."
+                        ),
+                    },
+                    "recurring_cadence": {
+                        "type": "string",
+                        "enum": sorted(_RECURRING_CADENCES),
+                        "description": (
+                            "For a check that repeats forever ONLY. Never "
+                            "combine with run_at."
+                        ),
+                    },
                 },
                 "required": ["name"],
             },
@@ -217,6 +287,40 @@ class MonitorCreateTool(BaseTool):
                 ),
                 success=False,
             )
+        # FASE 4Q.4A STEP 6 -- deterministic normalization from the new
+        # model-facing run_at/recurring_cadence pair to the existing,
+        # UNCHANGED MonitorService.create_monitor(cadence=..., run_at=...)
+        # contract. The model never picks the low-level cadence label
+        # itself: ONCE is a structural consequence of supplying run_at,
+        # MANUAL a structural consequence of supplying neither.
+        run_at = params.get("run_at")
+        recurring_cadence = params.get("recurring_cadence")
+        if run_at is not None and recurring_cadence is not None:
+            return ToolResult(
+                tool_name="maia_monitor_create",
+                content=(
+                    "run_at and recurring_cadence are mutually exclusive -- "
+                    "supply run_at for a single future check OR "
+                    "recurring_cadence for a repeating one, never both."
+                ),
+                success=False,
+            )
+        if recurring_cadence is not None and recurring_cadence not in _RECURRING_CADENCES:
+            return ToolResult(
+                tool_name="maia_monitor_create",
+                content=(
+                    f"Invalid recurring_cadence {recurring_cadence!r}; must be "
+                    f"one of {sorted(_RECURRING_CADENCES)}."
+                ),
+                success=False,
+            )
+        if run_at is not None:
+            cadence = CADENCE_ONCE
+        elif recurring_cadence is not None:
+            cadence = recurring_cadence
+        else:
+            cadence = CADENCE_MANUAL
+
         # FASE 4Q.3: bind the monitor to the REAL creating identity, never
         # the generic "monitor:default" MonitorService.create_monitor()'s
         # own signature would otherwise leave in place. This is what makes
@@ -232,8 +336,9 @@ class MonitorCreateTool(BaseTool):
             mon = self._service.create_monitor(
                 name,
                 source_requirements,
-                cadence=params.get("cadence", "MANUAL"),
+                cadence=cadence,
                 principal=resolve_runtime_principal(),
+                run_at=run_at,
             )
         except ValueError as exc:
             return ToolResult(tool_name="maia_monitor_create", content=str(exc), success=False)
@@ -247,20 +352,30 @@ class MonitorCreateTool(BaseTool):
         # unaffected.
         if result.get("scheduler_task_id") is None:
             result["execution_note"] = (
-                "No scheduler task is currently wired to this monitor -- it is "
-                "saved and enabled, but nothing will invoke it automatically yet. "
-                "Tell the user it was saved, not that it is actively checking. "
-                "Any future notification would need maia_notifications_list to "
-                "be checked explicitly -- it is never pushed into this chat."
+                "AUTHORITATIVE scheduler-execution state -- reproduce this "
+                "meaning faithfully, do not contradict/reinterpret/weaken/"
+                "strengthen/replace it. No scheduler task is currently wired to "
+                "this monitor -- it is saved and enabled (that describes only "
+                "the monitor DEFINITION, not execution), but nothing will invoke "
+                "it automatically yet. You MUST state that nothing will execute "
+                "it automatically. You MUST NOT say or imply it 'will run', "
+                "'will check', 'will execute tomorrow', 'is scheduled to run "
+                "automatically', or any equivalent phrase. Tell the user it was "
+                "saved, not that it is actively checking. Any future "
+                "notification would need maia_notifications_list to be checked "
+                "explicitly -- it is never pushed into this chat."
             )
         else:
             result["execution_note"] = (
-                "A scheduler task was created for this monitor, but it only "
-                "actually fires while the separate scheduler runtime process is "
-                "running -- tell the user it is scheduled, not that it is "
-                "guaranteed to run unless you know that process is active. Any "
-                "resulting notification is never pushed into this chat -- it "
-                "must be checked explicitly via maia_notifications_list."
+                "AUTHORITATIVE scheduler-execution state -- reproduce this "
+                "meaning faithfully, do not contradict/reinterpret/weaken/"
+                "strengthen/replace it. A scheduler task was created for this "
+                "monitor, but it only actually fires while the separate "
+                "scheduler runtime process is running -- tell the user it is "
+                "scheduled, not that it is guaranteed to run unless you know "
+                "that process is active. Any resulting notification is never "
+                "pushed into this chat -- it must be checked explicitly via "
+                "maia_notifications_list."
             )
         return ToolResult(tool_name="maia_monitor_create", content=json.dumps(result), success=True)
 
@@ -360,6 +475,61 @@ class MonitorRunNowTool(BaseTool):
                 }
             ),
             success=run.status != "failed",
+        )
+
+
+@ToolRegistry.register("maia_daily_attention_summary")
+class DailyAttentionSummaryTool(BaseTool):
+    """FASE 4Q.4 -- the one small primitive the architecture audit found
+    genuinely missing: a deterministic, explainable grouping/priority
+    ordering over the current user's own notifications. Pure computation
+    over MonitorService.list_notifications() -- no new storage, no new
+    service, reuses Notification Runtime V1 exactly as it already is."""
+
+    tool_id = "maia_daily_attention_summary"
+
+    def __init__(self, service: Optional[MonitorService] = None) -> None:
+        self._service = service or MonitorService()
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="maia_daily_attention_summary",
+            description=(
+                "Get the current user's notifications already grouped and "
+                "prioritized -- this is the right first call for a natural "
+                "'what should I look at today / is there anything I need to "
+                "know about' question, instead of guessing from a raw list. "
+                "Returns three groups: attention_items (genuinely need review, "
+                "ordered by severity then how new/reopened then recency -- each "
+                "with an explicit priority_reason you can quote, never an "
+                "opaque score), acknowledged (already seen -- do not present "
+                "these as new), and informational (e.g. a RESOLVED transition -- "
+                "useful context, not a current problem). If attention_items is "
+                "empty, say so plainly rather than inventing urgency -- you may "
+                "then offer informational status if it's actually useful. This "
+                "reflects only what is genuinely persisted; it does not mean "
+                "anything was pushed to the user, and marking/acknowledging a "
+                "notification never resolves the underlying issue or performs "
+                "any business action."
+            ),
+            parameters={"type": "object", "properties": {}, "required": []},
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        from openjarvis.second_brain.identity import resolve_runtime_principal
+
+        notifications = self._service.list_notifications(principal=resolve_runtime_principal())
+        summary = build_attention_summary(notifications)
+        return ToolResult(
+            tool_name="maia_daily_attention_summary",
+            content=json.dumps(summary),
+            success=True,
+            metadata={
+                "num_attention_items": len(summary["attention_items"]),
+                "num_acknowledged": len(summary["acknowledged"]),
+                "num_informational": len(summary["informational"]),
+            },
         )
 
 
@@ -562,6 +732,7 @@ __all__ = [
     "MonitorEnableTool",
     "MonitorDisableTool",
     "MonitorRunNowTool",
+    "DailyAttentionSummaryTool",
     "NotificationsListTool",
     "NotificationsUnreadCountTool",
     "NotificationGetTool",

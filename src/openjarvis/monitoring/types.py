@@ -18,10 +18,18 @@ from typing import Any, Dict, List, Optional
 CADENCE_HOURLY = "HOURLY"
 CADENCE_DAILY = "DAILY"
 CADENCE_MANUAL = "MANUAL"
-VALID_CADENCES = frozenset({CADENCE_HOURLY, CADENCE_DAILY, CADENCE_MANUAL})
+# FASE 4Q.4A: a genuine one-time future check ("controllalo domani") is not
+# a recurring cadence -- the underlying TaskScheduler already supports
+# exactly this via schedule_type="once" (see scheduler/scheduler.py), it
+# was only ever missing from this higher-level vocabulary. A ONCE monitor
+# requires an explicit run_at target timestamp (see MonitorDefinition.run_at)
+# instead of a seconds-per-cycle interval.
+CADENCE_ONCE = "ONCE"
+VALID_CADENCES = frozenset({CADENCE_HOURLY, CADENCE_DAILY, CADENCE_MANUAL, CADENCE_ONCE})
 
-# Seconds-per-cycle for the two scheduled cadences -- bounded, no
-# sub-minute polling anywhere (STEP 10).
+# Seconds-per-cycle for the two recurring cadences -- bounded, no
+# sub-minute polling anywhere (STEP 10). CADENCE_ONCE is deliberately not
+# here: it schedules at an explicit run_at timestamp, not a fixed interval.
 _CADENCE_SECONDS = {CADENCE_HOURLY: 3600, CADENCE_DAILY: 86400}
 
 MONITOR_STATUS_ACTIVE = "active"
@@ -76,6 +84,9 @@ class MonitorDefinition:
     )
     scheduler_task_id: Optional[str] = None
     consecutive_failures: int = 0
+    # FASE 4Q.4A: the target ISO datetime for a CADENCE_ONCE monitor --
+    # unused (None) for every other cadence.
+    run_at: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -93,6 +104,7 @@ class MonitorDefinition:
             "bounds": self.bounds,
             "scheduler_task_id": self.scheduler_task_id,
             "consecutive_failures": self.consecutive_failures,
+            "run_at": self.run_at,
         }
 
     @classmethod
@@ -112,6 +124,7 @@ class MonitorDefinition:
             bounds=d.get("bounds") or {"timeout_seconds": 30, "max_consecutive_failures": 5},
             scheduler_task_id=d.get("scheduler_task_id"),
             consecutive_failures=int(d.get("consecutive_failures", 0)),
+            run_at=d.get("run_at"),
         )
 
 
@@ -247,6 +260,7 @@ __all__ = [
     "CADENCE_HOURLY",
     "CADENCE_DAILY",
     "CADENCE_MANUAL",
+    "CADENCE_ONCE",
     "VALID_CADENCES",
     "_CADENCE_SECONDS",
     "MONITOR_STATUS_ACTIVE",

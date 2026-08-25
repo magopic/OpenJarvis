@@ -44,6 +44,7 @@ OP_MONITOR_CREATE = "MONITOR_CREATE"
 OP_MONITOR_ENABLE = "MONITOR_ENABLE"
 OP_MONITOR_DISABLE = "MONITOR_DISABLE"
 OP_MONITOR_RUN_NOW = "MONITOR_RUN_NOW"
+OP_ATTENTION_SUMMARY = "ATTENTION_SUMMARY"
 OP_NOTIFICATION_LIST = "NOTIFICATION_LIST"
 OP_NOTIFICATION_UNREAD_COUNT = "NOTIFICATION_UNREAD_COUNT"
 OP_NOTIFICATION_GET = "NOTIFICATION_GET"
@@ -62,6 +63,7 @@ _ALL_OPERATIONS = (
     OP_MONITOR_ENABLE,
     OP_MONITOR_DISABLE,
     OP_MONITOR_RUN_NOW,
+    OP_ATTENTION_SUMMARY,
     OP_NOTIFICATION_LIST,
     OP_NOTIFICATION_UNREAD_COUNT,
     OP_NOTIFICATION_GET,
@@ -115,7 +117,21 @@ class MaiaManageTool(BaseTool):
                         "description": "MONITOR_GET / MONITOR_ENABLE / MONITOR_DISABLE / MONITOR_RUN_NOW",
                     },
                     "name": {"type": "string", "description": "MONITOR_CREATE"},
-                    "cadence": {"type": "string", "description": "MONITOR_CREATE (HOURLY/DAILY/MANUAL)"},
+                    "run_at": {
+                        "type": "string",
+                        "description": (
+                            "MONITOR_CREATE -- single future check ONLY: exact "
+                            "ISO 8601 datetime with UTC offset. Never combine "
+                            "with recurring_cadence."
+                        ),
+                    },
+                    "recurring_cadence": {
+                        "type": "string",
+                        "description": (
+                            "MONITOR_CREATE -- repeating check ONLY (HOURLY/"
+                            "DAILY). Never combine with run_at."
+                        ),
+                    },
                     "enabled": {"type": "boolean", "description": "MONITOR_LIST filter"},
                     "notification_id": {
                         "type": "string",
@@ -227,7 +243,8 @@ def _op_monitor_create(params: Dict[str, Any]) -> ToolResult:
         second_brain_query=params.get("second_brain_query"),
         second_brain_domains=params.get("second_brain_domains"),
         document_query=params.get("document_query"),
-        cadence=params.get("cadence", "MANUAL"),
+        run_at=params.get("run_at"),
+        recurring_cadence=params.get("recurring_cadence"),
     )
 
 
@@ -256,6 +273,12 @@ def _op_monitor_run_now(params: Dict[str, Any]) -> ToolResult:
     from openjarvis.tools.monitoring_tools import MonitorRunNowTool
 
     return MonitorRunNowTool().execute(monitor_id=monitor_id)
+
+
+def _op_attention_summary(params: Dict[str, Any]) -> ToolResult:
+    from openjarvis.tools.monitoring_tools import DailyAttentionSummaryTool
+
+    return DailyAttentionSummaryTool().execute()
 
 
 def _op_notification_list(params: Dict[str, Any]) -> ToolResult:
@@ -315,6 +338,7 @@ _HANDLERS = {
     OP_MONITOR_ENABLE: _op_monitor_enable,
     OP_MONITOR_DISABLE: _op_monitor_disable,
     OP_MONITOR_RUN_NOW: _op_monitor_run_now,
+    OP_ATTENTION_SUMMARY: _op_attention_summary,
     OP_NOTIFICATION_LIST: _op_notification_list,
     OP_NOTIFICATION_UNREAD_COUNT: _op_notification_unread_count,
     OP_NOTIFICATION_GET: _op_notification_get,
@@ -336,7 +360,10 @@ __all__ = [
     "OP_MONITOR_ENABLE",
     "OP_MONITOR_DISABLE",
     "OP_MONITOR_RUN_NOW",
+    "OP_ATTENTION_SUMMARY",
     "OP_NOTIFICATION_LIST",
+    "OP_NOTIFICATION_UNREAD_COUNT",
     "OP_NOTIFICATION_GET",
+    "OP_NOTIFICATION_MARK_READ",
     "OP_NOTIFICATION_ACKNOWLEDGE",
 ]

@@ -287,6 +287,141 @@ class TestAskAgentOption:
         agent_setup.engine.generate.assert_not_called()
 
 
+class TestAskMaiaSafeAgentUpgrade:
+    """FASE 4Q.4A -- same root cause and same fix as chat_cmd.py's
+    identical "MAIA-safe upgrade" gate: a plain ``jarvis ask`` (no
+    --agent) must upgrade a non-tool-capable default agent to
+    "orchestrator" when MAIA's own always-safe tool family (Second
+    Brain/Document Knowledge/Proactive Insight/Monitoring/maia_manage/
+    Governed Action -- resolve_tool_names() in cli/_tool_names.py) is
+    available, not only when OPS Bridge tools have passed governance."""
+
+    def test_default_agent_upgrades_to_orchestrator_for_maia_tool_family(
+        self, runner
+    ) -> None:
+        from openjarvis.agents._stubs import AgentContext, AgentResult, BaseAgent
+        from openjarvis.core.config import JarvisConfig
+        from openjarvis.core.registry import AgentRegistry, ToolRegistry
+
+        class _NonToolStub(BaseAgent):
+            agent_id = "non_tool_stub_ask"
+
+            def run(self, input, context: AgentContext | None = None, **kwargs):
+                return AgentResult(content="non-tool reply", turns=1)
+
+        class _OrchestratorStub(ToolUsingAgent):
+            agent_id = "orchestrator"
+
+            def run(self, input, context: AgentContext | None = None, **kwargs):
+                names = sorted(t.spec.name for t in self._tools)
+                return AgentResult(
+                    content=f"orchestrator reply tools={names}", turns=1
+                )
+
+        class _MaiaAttentionStub(BaseTool):
+            tool_id = "maia_daily_attention_summary"
+
+            @property
+            def spec(self) -> ToolSpec:
+                return ToolSpec(
+                    name="maia_daily_attention_summary",
+                    description="stub",
+                )
+
+            def execute(self, **params) -> ToolResult:
+                return ToolResult(
+                    tool_name="maia_daily_attention_summary",
+                    content="{}",
+                    success=True,
+                )
+
+        engine = _mock_engine("unused")
+        config = JarvisConfig()
+        config.intelligence.default_model = "test-model"
+        config.agent.default_agent = "non_tool_stub_ask"
+
+        AgentRegistry.register_value("non_tool_stub_ask", _NonToolStub)
+        AgentRegistry.register_value("orchestrator", _OrchestratorStub)
+        ToolRegistry.register_value(
+            "maia_daily_attention_summary", _MaiaAttentionStub
+        )
+
+        with (
+            patch.object(_ask_mod, "load_config", return_value=config),
+            patch.object(_ask_mod, "get_engine", return_value=("mock", engine)),
+            patch.object(
+                _ask_mod, "discover_engines", return_value=[("mock", engine)]
+            ),
+            patch.object(
+                _ask_mod,
+                "discover_models",
+                return_value={"mock": ["test-model"]},
+            ),
+            patch.object(_ask_mod, "register_builtin_models"),
+            patch.object(_ask_mod, "merge_discovered_models"),
+            patch(
+                "openjarvis.tools.ops_bridge_generic.get_auto_enabled_ops_tool_ids",
+                return_value=[],
+            ),
+        ):
+            result = runner.invoke(cli, ["ask", "Hello"])
+
+        assert result.exit_code == 0
+        assert "orchestrator reply" in result.output
+        assert "maia_daily_attention_summary" in result.output
+
+    def test_default_agent_stays_non_tool_capable_when_nothing_registered(
+        self, runner
+    ) -> None:
+        from openjarvis.agents._stubs import AgentContext, AgentResult, BaseAgent
+        from openjarvis.core.config import JarvisConfig
+        from openjarvis.core.registry import AgentRegistry
+
+        class _NonToolStub(BaseAgent):
+            agent_id = "non_tool_stub_ask_2"
+
+            def run(self, input, context: AgentContext | None = None, **kwargs):
+                return AgentResult(content="non-tool reply", turns=1)
+
+        class _OrchestratorStub(ToolUsingAgent):
+            agent_id = "orchestrator"
+
+            def run(self, input, context: AgentContext | None = None, **kwargs):
+                return AgentResult(content="orchestrator reply", turns=1)
+
+        engine = _mock_engine("unused")
+        config = JarvisConfig()
+        config.intelligence.default_model = "test-model"
+        config.agent.default_agent = "non_tool_stub_ask_2"
+
+        AgentRegistry.register_value("non_tool_stub_ask_2", _NonToolStub)
+        AgentRegistry.register_value("orchestrator", _OrchestratorStub)
+
+        with (
+            patch.object(_ask_mod, "load_config", return_value=config),
+            patch.object(_ask_mod, "get_engine", return_value=("mock", engine)),
+            patch.object(
+                _ask_mod, "discover_engines", return_value=[("mock", engine)]
+            ),
+            patch.object(
+                _ask_mod,
+                "discover_models",
+                return_value={"mock": ["test-model"]},
+            ),
+            patch.object(_ask_mod, "register_builtin_models"),
+            patch.object(_ask_mod, "merge_discovered_models"),
+            patch(
+                "openjarvis.tools.ops_bridge_generic.get_auto_enabled_ops_tool_ids",
+                return_value=[],
+            ),
+        ):
+            result = runner.invoke(cli, ["ask", "Hello"])
+
+        assert result.exit_code == 0
+        assert "non-tool reply" in result.output
+        assert "orchestrator reply" not in result.output
+
+
 class TestBuildTools:
     def test_build_calculator(self, mock_setup):
         from openjarvis.cli.ask import _build_tools

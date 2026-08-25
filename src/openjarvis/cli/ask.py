@@ -749,12 +749,17 @@ def ask(
             agent_name = configured_default
 
     # MAIA-safe upgrade: if the resolved default agent can't call tools and
-    # OPS Bridge tools have passed governance for auto-enable (see
-    # ops_bridge_generic.get_auto_enabled_ops_tool_ids), route to
-    # "orchestrator" instead -- otherwise business queries would silently
-    # be answered with no tool access and no way to notice. Only applies
-    # when --agent wasn't explicitly passed; non-MAIA installs (no Bridge,
-    # no auto-enabled capabilities) see no behavior change, and the
+    # a governed tool is actually available to call, route to "orchestrator"
+    # instead -- otherwise business queries would silently be answered with
+    # no tool access and no way to notice. FASE 4Q.4A: this used to check
+    # OPS Bridge auto-enable only, missing the Second Brain/Document
+    # Knowledge/Proactive Insight/Monitoring/maia_manage/Governed Action
+    # families that resolve_tool_names() already always unions in as "safe
+    # to auto-enable" (see _tool_names.py) -- so a default session could
+    # never actually reach maia_daily_attention_summary or any other MAIA
+    # tool. Now matches resolve_tool_names()'s own full list. Only applies
+    # when --agent wasn't explicitly passed; installs where nothing it
+    # resolves is actually registered see no behavior change, and the
     # configured default remains reachable via `--agent <name>`.
     if not agent_explicitly_set and agent_name:
         try:
@@ -772,11 +777,17 @@ def ask(
                 and AgentRegistry.contains("orchestrator")
             ):
                 import openjarvis.tools  # noqa: F401 -- trigger registration
-                from openjarvis.tools.ops_bridge_generic import (
-                    get_auto_enabled_ops_tool_ids,
-                )
+                from openjarvis.core.registry import ToolRegistry
 
-                if get_auto_enabled_ops_tool_ids():
+                _candidate_tool_names = resolve_tool_names(
+                    tool_names,
+                    getattr(config.tools, "enabled", None),
+                    getattr(config.agent, "tools", None),
+                )
+                if any(
+                    ToolRegistry.contains(tname)
+                    for tname in _candidate_tool_names
+                ):
                     agent_name = "orchestrator"
         except Exception:
             pass

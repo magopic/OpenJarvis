@@ -115,6 +115,10 @@ class MonitorStore:
             "ALTER TABLE monitor_notifications ADD COLUMN title TEXT",
             "ALTER TABLE monitor_notifications ADD COLUMN summary TEXT",
             "ALTER TABLE monitor_notifications ADD COLUMN read_at TEXT",
+            # FASE 4Q.4A: the target ISO datetime for a CADENCE_ONCE
+            # monitor (see monitoring/types.py) -- NULL for every other
+            # cadence, same additive-migration pattern as above.
+            "ALTER TABLE monitors ADD COLUMN run_at TEXT",
         ]
         for migration in _MIGRATIONS:
             try:
@@ -169,8 +173,8 @@ class MonitorStore:
             """INSERT OR REPLACE INTO monitors
                (id, name, source_requirements, enabled, cadence, detector_scope,
                 principal, created_at, last_run_at, last_success_at, status,
-                bounds, scheduler_task_id, consecutive_failures)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                bounds, scheduler_task_id, consecutive_failures, run_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 m["id"],
                 m["name"],
@@ -186,6 +190,7 @@ class MonitorStore:
                 json.dumps(m.get("bounds") or {}),
                 m.get("scheduler_task_id"),
                 int(m.get("consecutive_failures", 0)),
+                m.get("run_at"),
             ),
         )
         self._conn.commit()

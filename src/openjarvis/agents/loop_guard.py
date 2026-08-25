@@ -29,6 +29,13 @@ class LoopVerdict:
     blocked: bool = False
     reason: str = ""
     warned: bool = False
+    # FASE 4Q.4A: a stable identity for the warn-before-block dedup in
+    # check_call() -- unlike `reason`, this must NOT change across
+    # repeated triggers of the same underlying pattern (e.g. it must not
+    # embed a growing repetition count), or the "warn once, then block"
+    # policy never actually reaches "block". Empty for verdicts sourced
+    # from the Rust backend, which falls back to `reason` instead.
+    cycle_key: str = ""
 
 
 class LoopGuard:
@@ -85,10 +92,15 @@ class LoopGuard:
 
         # Wrap with warn-before-block logic
         if verdict.blocked and self._config.warn_before_block:
-            cycle_key = verdict.reason
+            cycle_key = verdict.cycle_key or verdict.reason
             if cycle_key not in self._warned_cycles:
                 self._warned_cycles.add(cycle_key)
-                return LoopVerdict(blocked=False, warned=True, reason=verdict.reason)
+                return LoopVerdict(
+                    blocked=False,
+                    warned=True,
+                    reason=verdict.reason,
+                    cycle_key=verdict.cycle_key,
+                )
         return verdict
 
     def _python_check(self, tool_name: str, arguments: str) -> LoopVerdict:
@@ -105,6 +117,10 @@ class LoopGuard:
                     f"{self._call_counts[call_hash]} times "
                     f"(max {self._config.max_identical_calls})."
                 ),
+                # Stable across repeats -- call_hash itself never changes
+                # for the same (tool_name, arguments) pair, unlike the
+                # human-readable count in `reason` above.
+                cycle_key=f"identical_call:{call_hash}",
             )
 
         # 2. Per-tool budget (polling tools)
@@ -117,6 +133,7 @@ class LoopGuard:
                     f"Tool '{tool_name}' exceeded poll budget "
                     f"({self._config.poll_tool_budget})."
                 ),
+                cycle_key=f"poll_budget:{tool_name}",
             )
 
         # 3. Ping-pong detection
@@ -127,6 +144,7 @@ class LoopGuard:
                 return LoopVerdict(
                     blocked=True,
                     reason="Repetitive tool-calling pattern detected (ping-pong).",
+                    cycle_key="ping_pong",
                 )
 
         return LoopVerdict()

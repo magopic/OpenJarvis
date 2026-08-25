@@ -11,6 +11,7 @@ already established in tests/tools/test_proactive_insight_tools.py).
 from __future__ import annotations
 
 import tempfile
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -98,6 +99,198 @@ class TestMonitorCreation:
         m2 = svc.create_monitor("same name", {"ops_capability": "ops.production.get_kpi"})
         assert m1.id != m2.id
         assert len(svc.list_monitors()) == 2
+
+    def test_u_once_cadence_requires_run_at(self):
+        """FASE 4Q.4A -- 'controllalo domani' is a one-time future check,
+        not a recurring DAILY monitor. cadence='ONCE' without run_at must
+        fail with a real, specific, quotable error -- not silently become
+        DAILY and not surface as some unrelated fabricated failure."""
+        svc = _svc()
+        with pytest.raises(ValueError, match="run_at"):
+            svc.create_monitor("x", {"ops_capability": "ops.production.get_kpi"}, cadence="ONCE")
+
+    def test_v_once_cadence_rejects_non_iso_run_at(self):
+        svc = _svc()
+        with pytest.raises(ValueError, match="run_at"):
+            svc.create_monitor(
+                "x",
+                {"ops_capability": "ops.production.get_kpi"},
+                cadence="ONCE",
+                run_at="domani",
+            )
+
+    def test_w_once_cadence_rejects_naive_run_at(self):
+        """No UTC offset -- ambiguous which timezone 'tomorrow 9am' means."""
+        svc = _svc()
+        with pytest.raises(ValueError, match="run_at"):
+            svc.create_monitor(
+                "x",
+                {"ops_capability": "ops.production.get_kpi"},
+                cadence="ONCE",
+                run_at="2026-08-26T09:00:00",
+            )
+
+    def test_x_run_at_without_once_cadence_rejected(self):
+        svc = _svc()
+        with pytest.raises(ValueError, match="run_at"):
+            svc.create_monitor(
+                "x",
+                {"ops_capability": "ops.production.get_kpi"},
+                cadence="MANUAL",
+                run_at="2026-08-26T09:00:00+00:00",
+            )
+
+    def test_y_once_cadence_creates_and_persists_run_at(self):
+        svc = _svc()
+        mon = svc.create_monitor(
+            "check tomorrow",
+            {"ops_capability": "ops.production.get_kpi"},
+            cadence="ONCE",
+            run_at="2026-08-26T09:00:00+00:00",
+        )
+        assert mon.cadence == "ONCE"
+        assert mon.run_at == "2026-08-26T09:00:00+00:00"
+        reloaded = svc.get_monitor(mon.id)
+        assert reloaded is not None
+        assert reloaded.cadence == "ONCE"
+        assert reloaded.run_at == "2026-08-26T09:00:00+00:00"
+
+    def test_z_once_cadence_binds_scheduler_task_id_once_not_interval(self):
+        """When a real TaskScheduler is wired, ONCE must bind via
+        schedule_type='once' with the exact run_at value -- never the
+        interval-seconds mapping the recurring cadences use."""
+
+        class _FakeTask:
+            def __init__(self, id: str) -> None:
+                self.id = id
+
+        class _FakeScheduler:
+            def __init__(self) -> None:
+                self.created: list[dict] = []
+
+            def get_task(self, task_id: str):
+                return None
+
+            def create_task(self, **kwargs):
+                self.created.append(kwargs)
+                return _FakeTask(kwargs["task_id"])
+
+        scheduler = _FakeScheduler()
+        svc = MonitorService(store=MonitorStore(tempfile.mktemp(suffix=".db")), scheduler=scheduler)
+        mon = svc.create_monitor(
+            "check tomorrow",
+            {"ops_capability": "ops.production.get_kpi"},
+            cadence="ONCE",
+            run_at="2026-08-26T09:00:00+00:00",
+        )
+        assert len(scheduler.created) == 1
+        assert scheduler.created[0]["schedule_type"] == "once"
+        assert scheduler.created[0]["schedule_value"] == "2026-08-26T09:00:00+00:00"
+        assert mon.scheduler_task_id == f"monitor:{mon.id}"
+
+    def test_aa_failed_once_creation_persists_nothing(self):
+        """No duplicate/partial monitor or task after a rejected create --
+        the validation error must fire before anything is saved."""
+        svc = _svc()
+        with pytest.raises(ValueError):
+            svc.create_monitor("x", {"ops_capability": "ops.production.get_kpi"}, cadence="ONCE")
+        assert svc.list_monitors() == []
+
+    def test_bb_once_future_run_at_succeeds(self):
+        """FASE 4Q.4A Fix B, TEST B1 -- a genuinely future run_at succeeds
+        and persists exactly once."""
+        svc = _svc()
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        mon = svc.create_monitor(
+            "x", {"ops_capability": "ops.production.get_kpi"}, cadence="ONCE", run_at=future
+        )
+        assert mon.cadence == "ONCE"
+        assert mon.run_at == future
+        assert len(svc.list_monitors()) == 1
+
+    def test_cc_once_run_at_equal_to_now_rejected(self):
+        """TEST B2 -- by the time create_monitor() computes its own
+        authoritative 'now', a value captured a moment earlier in the
+        test is already at-or-before it -- the boundary case."""
+        svc = _svc()
+        captured_now = datetime.now(timezone.utc).isoformat()
+        with pytest.raises(ValueError, match="future"):
+            svc.create_monitor(
+                "x", {"ops_capability": "ops.production.get_kpi"}, cadence="ONCE", run_at=captured_now
+            )
+        assert svc.list_monitors() == []
+
+    def test_dd_once_past_run_at_rejected(self):
+        """TEST B3 -- the live certification failure this fix targets:
+        run_at='2025-07-16T09:00:00+02:00' persisted for a 'domani'
+        request made on 2026-08-25, over a year in the past, with no
+        rejection anywhere. Must now fail with a real, specific,
+        quotable error naming both the requirement and the actual
+        current time -- and persist nothing."""
+        svc = _svc()
+        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        with pytest.raises(ValueError, match="future"):
+            svc.create_monitor(
+                "x", {"ops_capability": "ops.production.get_kpi"}, cadence="ONCE", run_at=past
+            )
+        assert svc.list_monitors() == []
+
+    def test_ee_rejected_once_never_touches_scheduler(self):
+        """TEST B4 -- rejection happens before scheduler binding: the
+        scheduler must receive zero create_task calls."""
+
+        class _SpyScheduler:
+            def __init__(self) -> None:
+                self.create_calls = 0
+
+            def get_task(self, task_id):
+                return None
+
+            def create_task(self, **kwargs):
+                self.create_calls += 1
+                raise AssertionError("scheduler must not be touched")
+
+        scheduler = _SpyScheduler()
+        svc = MonitorService(store=MonitorStore(tempfile.mktemp(suffix=".db")), scheduler=scheduler)
+        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        with pytest.raises(ValueError, match="future"):
+            svc.create_monitor(
+                "x", {"ops_capability": "ops.production.get_kpi"}, cadence="ONCE", run_at=past
+            )
+        assert scheduler.create_calls == 0
+        assert svc.list_monitors() == []
+
+    def test_ff_future_at_different_offset_succeeds(self):
+        """TEST B5 (positive case) -- a genuinely future instant expressed
+        in a non-UTC offset must succeed; comparison must be by real
+        datetime value, not raw ISO text."""
+        svc = _svc()
+        now_utc = datetime.now(timezone.utc)
+        future = (now_utc + timedelta(hours=1)).astimezone(timezone(timedelta(hours=2)))
+        mon = svc.create_monitor(
+            "x",
+            {"ops_capability": "ops.production.get_kpi"},
+            cadence="ONCE",
+            run_at=future.isoformat(),
+        )
+        assert mon.cadence == "ONCE"
+
+    def test_gg_past_at_different_offset_rejected_despite_larger_raw_string(self):
+        """TEST B5 (adversarial case) -- an instant one hour in the PAST,
+        shifted to a +05:00 offset, has wall-clock digits that sort AFTER
+        a plain UTC 'now' string would -- exactly the case a naive raw
+        ISO-string comparison gets backwards. Must still be rejected."""
+        svc = _svc()
+        now_utc = datetime.now(timezone.utc)
+        past = (now_utc - timedelta(hours=1)).astimezone(timezone(timedelta(hours=5)))
+        with pytest.raises(ValueError, match="future"):
+            svc.create_monitor(
+                "x",
+                {"ops_capability": "ops.production.get_kpi"},
+                cadence="ONCE",
+                run_at=past.isoformat(),
+            )
+        assert svc.list_monitors() == []
 
 
 class TestMonitorLifecycleRun:

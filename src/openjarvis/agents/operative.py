@@ -85,6 +85,7 @@ class OperativeAgent(ToolUsingAgent):
         **kwargs: Any,
     ) -> AgentResult:
         """Execute a single operator tick."""
+        self._reset_loop_guard_for_new_turn()
         self._emit_turn_start(input)
 
         # 1. Build system prompt with state context

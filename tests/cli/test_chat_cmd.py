@@ -393,6 +393,132 @@ class TestChatAgents:
         assert "chat executed!" in result.output
 
 
+class TestChatMaiaSafeAgentUpgrade:
+    """FASE 4Q.4A -- root cause of the live "Cosa devo guardare oggi?"
+    certification failure: a plain ``jarvis chat`` (no --agent) upgraded
+    a non-tool-capable default agent to "orchestrator" ONLY when OPS
+    Bridge tools had passed governance for auto-enable -- never when
+    MAIA's own always-safe tool family (Second Brain/Document Knowledge/
+    Proactive Insight/Monitoring/maia_manage/Governed Action, unioned in
+    by resolve_tool_names() in cli/_tool_names.py) was the only thing
+    available. maia_daily_attention_summary was therefore structurally
+    unreachable in a default session, so the live model answered with no
+    tools and no operational framing at all -- it did not "misroute" the
+    question, it never saw the tool."""
+
+    def test_default_agent_upgrades_to_orchestrator_for_maia_tool_family(
+        self,
+    ) -> None:
+        class _NonToolStub(BaseAgent):
+            agent_id = "non_tool_stub"
+
+            def run(self, input, context: AgentContext | None = None, **kwargs):
+                return AgentResult(content="non-tool reply", turns=1)
+
+        class _OrchestratorStub(ToolUsingAgent):
+            agent_id = "orchestrator"
+
+            def run(self, input, context: AgentContext | None = None, **kwargs):
+                names = sorted(t.spec.name for t in self._tools)
+                return AgentResult(
+                    content=f"orchestrator reply tools={names}", turns=1
+                )
+
+        class _MaiaAttentionStub(BaseTool):
+            tool_id = "maia_daily_attention_summary"
+
+            @property
+            def spec(self) -> ToolSpec:
+                return ToolSpec(
+                    name="maia_daily_attention_summary",
+                    description="stub",
+                )
+
+            def execute(self, **params) -> ToolResult:
+                return ToolResult(
+                    tool_name="maia_daily_attention_summary",
+                    content="{}",
+                    success=True,
+                )
+
+        engine = MagicMock()
+        engine.engine_id = "mock"
+        config = JarvisConfig()
+        config.intelligence.default_model = "test-model"
+        config.agent.default_agent = "non_tool_stub"
+
+        AgentRegistry.register_value("non_tool_stub", _NonToolStub)
+        AgentRegistry.register_value("orchestrator", _OrchestratorStub)
+        ToolRegistry.register_value(
+            "maia_daily_attention_summary", _MaiaAttentionStub
+        )
+
+        with (
+            patch("openjarvis.cli.chat_cmd.load_config", return_value=config),
+            patch("openjarvis.engine.get_engine", return_value=("mock", engine)),
+            patch("openjarvis.intelligence.register_builtin_models"),
+            patch(
+                "openjarvis.tools.ops_bridge_generic.get_auto_enabled_ops_tool_ids",
+                return_value=[],
+            ),
+        ):
+            result = CliRunner().invoke(
+                chat,
+                ["--model", "test-model"],
+                input="hello\n/quit\n",
+            )
+
+        assert result.exit_code == 0
+        assert "orchestrator reply" in result.output
+        assert "maia_daily_attention_summary" in result.output
+
+    def test_default_agent_stays_non_tool_capable_when_nothing_registered(
+        self,
+    ) -> None:
+        """No-op guarantee: with no OPS Bridge signal and no MAIA tool
+        registered, the default agent must NOT be silently upgraded."""
+
+        class _NonToolStub(BaseAgent):
+            agent_id = "non_tool_stub_2"
+
+            def run(self, input, context: AgentContext | None = None, **kwargs):
+                return AgentResult(content="non-tool reply", turns=1)
+
+        class _OrchestratorStub(ToolUsingAgent):
+            agent_id = "orchestrator"
+
+            def run(self, input, context: AgentContext | None = None, **kwargs):
+                return AgentResult(content="orchestrator reply", turns=1)
+
+        engine = MagicMock()
+        engine.engine_id = "mock"
+        config = JarvisConfig()
+        config.intelligence.default_model = "test-model"
+        config.agent.default_agent = "non_tool_stub_2"
+
+        AgentRegistry.register_value("non_tool_stub_2", _NonToolStub)
+        AgentRegistry.register_value("orchestrator", _OrchestratorStub)
+
+        with (
+            patch("openjarvis.cli.chat_cmd.load_config", return_value=config),
+            patch("openjarvis.engine.get_engine", return_value=("mock", engine)),
+            patch("openjarvis.intelligence.register_builtin_models"),
+            patch(
+                "openjarvis.tools.ops_bridge_generic.get_auto_enabled_ops_tool_ids",
+                return_value=[],
+            ),
+        ):
+            result = CliRunner().invoke(
+                chat,
+                ["--model", "test-model"],
+                input="hello\n/quit\n",
+            )
+
+        assert result.exit_code == 0
+        assert "non-tool reply" in result.output
+        assert "orchestrator reply" not in result.output
+
+
 class TestChatEngineSelectionParity:
     """FASE 4Q.1A -- letters A-F. ``jarvis chat`` must resolve engine+model
     exactly like ``jarvis ask`` (FASE 4P.3A's strict pairing), never

@@ -64,7 +64,17 @@ def test_config_prefix_prepended(memory_dir: Path):
 def test_empty_prefix_leaves_prompt_unchanged(memory_dir: Path):
     """Backward compatibility: the default empty prefix adds no section and
     leaves build() output identical to having no prefix configured."""
+    from datetime import datetime, timezone
+
     from openjarvis.prompt.builder import SystemPromptBuilder
+
+    # FASE 4Q.4A -- build() now includes the authoritative current-time
+    # section, which is genuinely time-dependent by design (that's the
+    # whole point of Fix A). Two independently-constructed builders are
+    # only comparable when pinned to the SAME instant -- otherwise this
+    # assertion would flake on real wall-clock drift between the two
+    # calls, which is not what this test is actually checking.
+    fixed_now = datetime(2026, 8, 25, 12, 0, 0, tzinfo=timezone.utc)
 
     def _make(prefix: str) -> SystemPromptBuilder:
         return SystemPromptBuilder(
@@ -75,6 +85,7 @@ def test_empty_prefix_leaves_prompt_unchanged(memory_dir: Path):
                 user_path=str(memory_dir / "USER.md"),
             ),
             system_prompt_config=SystemPromptConfig(prefix=prefix),
+            now=fixed_now,
         )
 
     assert _make("").build() == _make("").build()
@@ -182,16 +193,196 @@ def test_sections_expose_prompt_metadata(memory_dir: Path):
         "agent_template",
         "tool_grounding_discipline",
         "historical_evidence_discipline",
+        "referent_continuity_discipline",
+        "current_time",
         "soul",
         "memory",
         "user",
         "session_context",
         "previous_state",
     ]
-    assert sections[3].source == str(memory_dir / "SOUL.md")
-    assert sections[3].cache_segment == "frozen_prefix"
+    assert sections[5].source == str(memory_dir / "SOUL.md")
+    assert sections[5].cache_segment == "frozen_prefix"
     assert sections[-1].cache_segment == "dynamic_suffix"
     assert builder.build() == "\n\n".join(section.content for section in sections)
+
+
+def test_tool_grounding_discipline_covers_cross_turn_claim_freshness(memory_dir: Path):
+    """FASE 4Q.4A -- live certification finding: a claim ("no pending
+    approvals") was made in one turn without a fresh tool call actually
+    backing it, relying instead on an earlier, broader turn's result that
+    never covered that specific question. The grounding rule must say
+    explicitly that an earlier turn's tool result is evidence only for
+    what it actually returned, not for a new, more specific claim later."""
+    from openjarvis.prompt.builder import SystemPromptBuilder
+
+    builder = SystemPromptBuilder(
+        agent_template="You are Jarvis.",
+        memory_files_config=MemoryFilesConfig(
+            soul_path=str(memory_dir / "SOUL.md"),
+            memory_path=str(memory_dir / "MEMORY.md"),
+            user_path=str(memory_dir / "USER.md"),
+        ),
+        system_prompt_config=SystemPromptConfig(),
+    )
+    sections = builder.sections()
+    grounding = next(s for s in sections if s.name == "tool_grounding_discipline")
+    assert "earlier turn" in grounding.content
+    assert "call the appropriate tool again in this turn" in grounding.content
+
+
+def test_tool_grounding_discipline_covers_source_scope(memory_dir: Path):
+    """FASE 4Q.4A -- live certification finding: MAIA said 'the systems
+    are not configured for your reality' on the strength of empty
+    notifications/attention items/Second Brain/Document Knowledge results
+    alone -- none of which say anything about OPS Bridge configuration or
+    connectivity. The grounding rule must explicitly prohibit turning
+    'nothing found in the sources I queried' into a claim about a
+    different, unqueried system's configuration/availability."""
+    from openjarvis.prompt.builder import SystemPromptBuilder
+
+    builder = SystemPromptBuilder(
+        agent_template="You are Jarvis.",
+        memory_files_config=MemoryFilesConfig(
+            soul_path=str(memory_dir / "SOUL.md"),
+            memory_path=str(memory_dir / "MEMORY.md"),
+            user_path=str(memory_dir / "USER.md"),
+        ),
+        system_prompt_config=SystemPromptConfig(),
+    )
+    sections = builder.sections()
+    grounding = next(s for s in sections if s.name == "tool_grounding_discipline")
+    assert "not configured" in grounding.content
+    assert "DIFFERENT system or integration" in grounding.content
+    assert "did not query" in grounding.content
+
+
+def test_referent_continuity_discipline_present_and_distinguishes_roles(memory_dir: Path):
+    """FASE 4Q.4A Attempt #6B/CASE 1 -- live certification finding: 'lo'
+    resolved to the assistant's OWN just-introduced suggestion (a
+    procedure it proposed) instead of the user's own sustained task, and
+    persistent state was created around the wrong thing. The rule must
+    explicitly say the user's own task is the default referent, that an
+    assistant suggestion needs explicit selection, and that genuine
+    ambiguity before a persistent write should be clarified rather than
+    guessed."""
+    from openjarvis.prompt.builder import SystemPromptBuilder
+
+    builder = SystemPromptBuilder(
+        agent_template="You are Jarvis.",
+        memory_files_config=MemoryFilesConfig(
+            soul_path=str(memory_dir / "SOUL.md"),
+            memory_path=str(memory_dir / "MEMORY.md"),
+            user_path=str(memory_dir / "USER.md"),
+        ),
+        system_prompt_config=SystemPromptConfig(),
+    )
+    sections = builder.sections()
+    referent = next(s for s in sections if s.name == "referent_continuity_discipline")
+    assert "recency is not selection" in referent.content
+    assert "explicitly picked it" in referent.content
+    assert "ask one concise clarification question" in referent.content
+
+
+def _builder_with_now(memory_dir: Path, now):
+    from openjarvis.prompt.builder import SystemPromptBuilder
+
+    return SystemPromptBuilder(
+        agent_template="You are Jarvis.",
+        memory_files_config=MemoryFilesConfig(
+            soul_path=str(memory_dir / "SOUL.md"),
+            memory_path=str(memory_dir / "MEMORY.md"),
+            user_path=str(memory_dir / "USER.md"),
+        ),
+        system_prompt_config=SystemPromptConfig(),
+        now=now,
+    )
+
+
+def test_a1_current_time_section_present(memory_dir: Path):
+    """FASE 4Q.4A Attempt #7 Fix A -- the model must receive an
+    authoritative runtime date/time; the live certification fabricated
+    run_at='2025-07-16T09:00:00+02:00' for a 'domani' request made on the
+    real date 2026-08-25, over a year off, because no such context ever
+    reached it."""
+    from datetime import datetime, timezone, timedelta
+
+    now = datetime(2026, 8, 25, 13, 25, 0, tzinfo=timezone(timedelta(hours=2)))
+    builder = _builder_with_now(memory_dir, now)
+    sections = builder.sections()
+    current_time = next(s for s in sections if s.name == "current_time")
+    assert "Current Date & Time" in current_time.content
+    assert "2026-08-25" in current_time.content
+
+
+def test_a2_current_time_is_timezone_aware(memory_dir: Path):
+    from datetime import datetime, timezone, timedelta
+
+    now = datetime(2026, 8, 25, 13, 25, 0, tzinfo=timezone(timedelta(hours=2)))
+    builder = _builder_with_now(memory_dir, now)
+    current_time = next(s for s in builder.sections() if s.name == "current_time")
+    assert "+02:00" in current_time.content
+
+
+def test_a3_current_time_generated_dynamically_not_hardcoded(memory_dir: Path):
+    """Two builders with two different injected clocks must produce two
+    different current_time sections -- proving the value is computed,
+    never a static string."""
+    from datetime import datetime, timezone, timedelta
+
+    tz = timezone(timedelta(hours=2))
+    builder1 = _builder_with_now(memory_dir, datetime(2026, 8, 25, 13, 25, 0, tzinfo=tz))
+    builder2 = _builder_with_now(memory_dir, datetime(2030, 1, 1, 0, 0, 0, tzinfo=tz))
+    content1 = next(s for s in builder1.sections() if s.name == "current_time").content
+    content2 = next(s for s in builder2.sections() if s.name == "current_time").content
+    assert content1 != content2
+    assert "2026-08-25" in content1
+    assert "2030-01-01" in content2
+
+
+def test_a4_controlled_clock_resolves_today_and_tomorrow(memory_dir: Path):
+    """A controlled test clock of 2026-08-25T13:25:00+02:00 must yield a
+    current_time section unambiguously stating today=2026-08-25, from
+    which tomorrow=2026-08-26 follows by simple date arithmetic. No live
+    model call involved -- this only proves the injected value is
+    correct and present, not that a model would compute correctly."""
+    from datetime import date, datetime, timedelta, timezone
+
+    now = datetime(2026, 8, 25, 13, 25, 0, tzinfo=timezone(timedelta(hours=2)))
+    builder = _builder_with_now(memory_dir, now)
+    current_time = next(s for s in builder.sections() if s.name == "current_time")
+    assert "2026-08-25" in current_time.content
+    tomorrow = date(2026, 8, 25) + timedelta(days=1)
+    assert tomorrow.isoformat() == "2026-08-26"
+    assert tomorrow.isoformat() not in current_time.content  # only today is asserted, never precomputed
+
+
+def test_a5_existing_frozen_sections_present_and_ordered(memory_dir: Path):
+    """Adding current_time must not disturb the existing frozen sections
+    or their order."""
+    builder = _builder_with_now(memory_dir, None)
+    names = [s.name for s in builder.sections()]
+    assert names.index("tool_grounding_discipline") < names.index("historical_evidence_discipline")
+    assert names.index("historical_evidence_discipline") < names.index("referent_continuity_discipline")
+    assert names.index("referent_continuity_discipline") < names.index("current_time")
+    assert names.index("current_time") < names.index("soul")
+
+
+def test_default_now_used_when_not_injected(memory_dir: Path):
+    """Real callers never pass `now` -- the genuine runtime clock must be
+    used, and it must be timezone-aware."""
+    from openjarvis.prompt.builder import SystemPromptBuilder
+
+    builder = SystemPromptBuilder(
+        agent_template="You are Jarvis.",
+        memory_files_config=MemoryFilesConfig(
+            soul_path=str(memory_dir / "SOUL.md"),
+            memory_path=str(memory_dir / "MEMORY.md"),
+            user_path=str(memory_dir / "USER.md"),
+        ),
+        system_prompt_config=SystemPromptConfig(),
+    )
+    assert builder._now.tzinfo is not None
 
 
 def test_sections_keep_frozen_file_content_stable(memory_dir: Path):

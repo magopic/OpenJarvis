@@ -135,8 +135,16 @@ def chat(
 
             # MAIA-safe upgrade -- see ask.py for the identical rationale:
             # only overrides a non-tool-capable, non-explicit default when
-            # OPS Bridge tools have actually passed governance for
-            # auto-enable. No-op on non-MAIA installs.
+            # this session actually has a governed tool available to call.
+            # FASE 4Q.4A: this used to check OPS Bridge auto-enable only,
+            # missing the Second Brain/Document Knowledge/Proactive
+            # Insight/Monitoring/maia_manage/Governed Action families that
+            # resolve_tool_names() already always unions in as "safe to
+            # auto-enable" (see _tool_names.py) -- so a default session
+            # could never actually reach maia_daily_attention_summary or
+            # any other MAIA tool. Now matches resolve_tool_names()'s own
+            # full list. No-op when nothing it resolves is actually
+            # registered.
             if not agent_explicitly_set and AgentRegistry.contains(agent_key):
                 _candidate_cls = AgentRegistry.get(agent_key)
                 if (
@@ -144,11 +152,17 @@ def chat(
                     and AgentRegistry.contains("orchestrator")
                 ):
                     import openjarvis.tools  # noqa: F401 — trigger registration
-                    from openjarvis.tools.ops_bridge_generic import (
-                        get_auto_enabled_ops_tool_ids,
-                    )
+                    from openjarvis.core.registry import ToolRegistry
 
-                    if get_auto_enabled_ops_tool_ids():
+                    _candidate_tool_names = resolve_tool_names(
+                        tools,
+                        getattr(config.tools, "enabled", None),
+                        getattr(config.agent, "tools", None),
+                    )
+                    if any(
+                        ToolRegistry.contains(tname)
+                        for tname in _candidate_tool_names
+                    ):
                         agent_key = "orchestrator"
 
             if AgentRegistry.contains(agent_key):

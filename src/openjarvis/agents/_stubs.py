@@ -399,5 +399,20 @@ class ToolUsingAgent(BaseAgent):
         except ImportError:
             pass
 
+    def _reset_loop_guard_for_new_turn(self) -> None:
+        """FASE 4Q.4A -- call exactly once, as the very first thing a
+        concrete run() implementation does, so the loop guard's counters
+        start fresh for each new user turn (agent.run() call) instead of
+        accumulating across an entire multi-turn session (the shared
+        LoopGuard instance built in __init__ above previously lived for
+        the agent object's whole lifetime -- e.g. a whole `jarvis chat`
+        REPL session -- causing legitimate repeated reads across separate
+        turns to eventually trip poll_tool_budget). Counters still
+        accumulate normally for every tool call WITHIN this run(), so a
+        genuine same-turn degenerate loop is still caught exactly as
+        before -- only the cross-turn carryover is removed."""
+        if self._loop_guard:
+            self._loop_guard.reset()
+
 
 __all__ = ["AgentContext", "AgentResult", "BaseAgent", "ToolUsingAgent"]

@@ -62,6 +62,7 @@ _MONITORING_TOOL_IDS = (
     "maia_monitor_enable",
     "maia_monitor_disable",
     "maia_monitor_run_now",
+    "maia_daily_attention_summary",
     "maia_notifications_list",
     "maia_notifications_unread_count",
     "maia_notification_get",

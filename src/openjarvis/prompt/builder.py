@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Optional, Tuple
 
@@ -8,6 +9,58 @@ from openjarvis.core.config import MemoryFilesConfig, SystemPromptConfig
 from openjarvis.core.paths import get_config_dir
 
 PromptCacheSegment = Literal["frozen_prefix", "dynamic_suffix"]
+
+# Weekday names for the current-time section below -- avoids depending on
+# locale-sensitive strftime("%A") output, which is not guaranteed to be
+# English/stable across environments.
+_WEEKDAY_NAMES = (
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+)
+
+
+def _default_now() -> datetime:
+    """FASE 4Q.4A -- the real local runtime clock, timezone-aware.
+
+    ``datetime.now()`` returns a naive local-time value; ``.astimezone()``
+    with no argument attaches the system's actual local tzinfo to it
+    (e.g. +02:00 for this machine) -- this is what makes the value
+    genuinely timezone-aware without hardcoding any specific offset or
+    region, and without depending on config.timezone (proven in the
+    Attempt #7 diagnosis to be unrelated to this runtime: it defaults to
+    "America/Los_Angeles" and is only ever read by the unrelated
+    proactive-agent digest feature)."""
+    return datetime.now().astimezone()
+
+
+def _render_current_time_section(now: datetime) -> str:
+    """FASE 4Q.4A -- the runtime clock injected into the system prompt so
+    the model resolves relative expressions ('today', 'tomorrow', 'next
+    week', 'in two hours', a weekday name) against a real value instead
+    of guessing from its own training data. Generated fresh whenever a
+    SystemPromptBuilder is constructed (see __init__'s ``now`` parameter)
+    -- never a hardcoded date."""
+    weekday = _WEEKDAY_NAMES[now.weekday()]
+    return (
+        "## Current Date & Time (Authoritative)\n\n"
+        f"The current date and time, from the runtime clock, is:\n\n"
+        f"{now.isoformat()}\n\n"
+        f"Current date: {now.strftime('%Y-%m-%d')} ({weekday})\n"
+        f"Current time: {now.strftime('%H:%M')}\n"
+        f"UTC offset: {now.strftime('%z')}\n\n"
+        "This is the authoritative source for interpreting relative time "
+        "expressions -- 'today', 'tomorrow', 'next week', 'in two hours', "
+        "a weekday name, or any other relative reference. Always resolve "
+        "such expressions against this value. Never infer or guess the "
+        "current date from your own training data or memory -- this "
+        "runtime value is always correct and your own sense of 'the "
+        "current date' is not."
+    )
 
 # FASE 4M.5A: minimal, runtime-agnostic grounding rule. Deliberately generic
 # -- no business name, no domain vocabulary, no hardcoded number, threshold,
@@ -46,6 +99,10 @@ Additional discipline once you do have tool evidence:
 - A result meaning "no data available for this" is not the same as a result of zero. Say explicitly when data is unavailable rather than treating absence as a value.
 - If a tool result is explicitly marked as not yet validated, in review, or otherwise not certified, say so plainly rather than presenting it as settled fact.
 - If a tool result indicates some items were omitted or truncated (e.g. a `_truncated` marker, or a note about a shortened list), those omitted items are UNKNOWN to you. Do not name them, guess their identity, or characterize their values or trends -- describe only the items actually present in the result, and say the rest were not returned.
+
+A tool result from an earlier turn in this conversation is evidence only for what it actually returned -- it does not automatically extend to a new, more specific claim later just because the topic is related. If a later question asks about something no tool call in this conversation has actually returned yet (even if an earlier, broader call touched a related topic), call the appropriate tool again in this turn before answering, rather than inferring the answer from an earlier result that never actually covered it.
+
+A finding of zero/empty/nothing-to-report from the sources you actually queried (e.g. zero unread notifications, zero attention items, zero pending actions, an empty Document Knowledge or Second Brain result) is evidence only about THOSE sources. It is never evidence about the configuration, connectivity, or data availability of a DIFFERENT system or integration you did not query -- do not restate "nothing found in the sources I checked" as "the systems/integration are not configured" or "there is no operational data" unless you actually checked that system's configuration or connectivity itself. Keep the narration scoped to what was actually queried; do not call an unrelated system just to rule this out unless the user's question actually requires it.
 """
 
 # FASE 4N.3: a second, equally generic rule -- deliberately kept separate
@@ -74,6 +131,32 @@ Two records being related, similar, or co-occurring in the past does not mean on
 - When you present a past case as similar to the current one, state plainly what they actually share (e.g. matching domain, entity, or search terms) -- never invent or imply a numeric similarity score unless a tool result actually computed and returned one.
 """
 
+# FASE 4Q.4A -- a third, equally generic rule, addressing yet another
+# distinct failure mode: not "is this claim backed by evidence" (the first
+# rule) or "which TIME does this evidence describe" (the second), but
+# "WHOSE task does a later short reference (it/that/check it tomorrow)
+# actually point back to." A live certification found a later "check it"
+# silently resolved to the assistant's OWN just-introduced suggestion
+# (a procedure it proposed) instead of the user's own sustained task,
+# and then created persistent state (a monitor) around the wrong thing.
+# Deliberately reuses the conversation's own existing role-tagged history
+# -- no new context/memory mechanism, no keyword or language-specific
+# routing -- purely an instruction for how to weigh what is already
+# there. No business vocabulary, no domain-specific example -- correct
+# and harmless in any session, including one with no prior assistant
+# suggestions at all.
+_REFERENT_CONTINUITY_RULE = """## Referent Continuity for Follow-Ups
+
+When a later turn refers back with a short phrase ("it", "that", "do it again", "check it", "check it tomorrow", "repeat it", or an equivalent expression in any language), determine what it refers to using the conversation's own role-tagged history -- who actually said what, not just what was said most recently:
+
+- The user's own sustained, ongoing task or request -- what THEY asked you to look at, do, or check -- is the default referent.
+- Something YOU (the assistant) introduced yourself in an earlier turn -- a suggestion, recommendation, example, procedure, document, or possible action you proposed -- is a candidate referent ONLY once the user has explicitly picked it (e.g. "yes, do that one", "create that procedure"). Never let your own suggestion silently displace the user's own active task as the referent merely because you mentioned it more recently -- recency is not selection.
+
+If exactly one referent is clearly dominant from the conversation, proceed normally -- do not ask for clarification on an ordinary, unambiguous follow-up.
+
+If two or more referents remain materially plausible AND the next step would create or modify persistent state (e.g. creating a monitor, saving a record, taking an action) rather than just answering a question, ask one concise clarification question before taking that step, naming the candidates so the user can pick. Never create or modify persistent state against a guessed referent to avoid asking one question -- the cost of a wrong persistent action is higher than the cost of asking.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class PromptSection:
@@ -99,7 +182,15 @@ class SystemPromptBuilder:
         skill_catalog_xml: Optional[str] = None,
         skill_few_shot: Optional[List[str]] = None,
         skill_few_shot_examples: Optional[List[str]] = None,
+        now: Optional[datetime] = None,
     ) -> None:
+        # FASE 4Q.4A -- captured once, at builder-construction time (same
+        # lifetime as everything else in the frozen prefix -- one
+        # SystemPromptBuilder per agent, one agent per jarvis chat
+        # session). ``now`` is injectable for deterministic tests; real
+        # callers never pass it, so this is always the genuine runtime
+        # clock outside tests.
+        self._now = now if now is not None else _default_now()
         self._agent_template = agent_template
         _mf = memory_files_config or MemoryFilesConfig()
         self._mf_config = self._resolve_persona(_mf)
@@ -224,6 +315,22 @@ class SystemPromptBuilder:
             PromptSection(
                 name="historical_evidence_discipline",
                 content=_HISTORICAL_EVIDENCE_RULE,
+                source="builtin",
+                cache_segment="frozen_prefix",
+            )
+        )
+        sections.append(
+            PromptSection(
+                name="referent_continuity_discipline",
+                content=_REFERENT_CONTINUITY_RULE,
+                source="builtin",
+                cache_segment="frozen_prefix",
+            )
+        )
+        sections.append(
+            PromptSection(
+                name="current_time",
+                content=_render_current_time_section(self._now),
                 source="builtin",
                 cache_segment="frozen_prefix",
             )
