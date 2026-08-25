@@ -35,11 +35,6 @@ except ImportError:
     pass
 
 try:
-    import openjarvis.agents.react  # noqa: F401 -- backward-compat shim
-except ImportError:
-    pass
-
-try:
     import openjarvis.agents.openhands  # noqa: F401
 except ImportError:
     pass
@@ -61,11 +56,6 @@ except ImportError:
 
 try:
     import openjarvis.agents.operative  # noqa: F401
-except ImportError:
-    pass
-
-try:
-    import openjarvis.agents.monitor  # noqa: F401
 except ImportError:
     pass
 
