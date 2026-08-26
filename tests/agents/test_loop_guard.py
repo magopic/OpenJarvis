@@ -15,13 +15,20 @@ class TestLoopGuard:
         return LoopGuard(config, bus=bus), bus
 
     def test_identical_calls_blocked(self):
+        """M1.3 -- Loop Guard Parity: max_identical_calls=N tolerates N
+        identical calls and blocks the (N+1)th, both in the Python
+        fallback and in the Rust backend (rust/crates/openjarvis-agents/
+        src/loop_guard.rs's `check()` counts occurrences per call hash --
+        it no longer blocks unconditionally on the second occurrence
+        regardless of the configured limit)."""
         guard, bus = self._make_guard(max_identical_calls=2)
         v1 = guard.check_call("calc", '{"x": 1}')
         assert not v1.blocked
-        # Rust backend uses a HashSet — blocks on the second identical call
-        v2 = guard.check_call("calc", '{"x": 1}')
-        assert v2.blocked
-        assert "identical" in v2.reason.lower()
+        v2 = guard.check_call("calc", '{"x": 1}')  # boundary: 2nd of 2 tolerated
+        assert not v2.blocked
+        v3 = guard.check_call("calc", '{"x": 1}')  # 3rd -- over the limit
+        assert v3.blocked
+        assert "identical" in v3.reason.lower()
 
     def test_different_args_not_blocked(self):
         guard, _ = self._make_guard(max_identical_calls=2)
@@ -167,6 +174,111 @@ class TestLoopGuard:
         assert v1.cycle_key == v2.cycle_key  # but the dedup identity is stable
         assert v1.blocked is False and v1.warned is True
         assert v2.blocked is True
+
+
+class TestLoopGuardParityM13:
+    """M1.3 -- Loop Guard Parity. Frozen V1 semantics: max_identical_calls=N
+    tolerates N identical (tool_name, arguments) calls and blocks the
+    (N+1)th, identically in the Python fallback and in the Rust backend
+    (rust/crates/openjarvis-agents/src/loop_guard.rs). Before this fix,
+    Rust's `check()` never consulted its own `max_identical` field and
+    instead blocked unconditionally on the second occurrence -- see
+    test_identical_calls_blocked above for the specific regression this
+    closes."""
+
+    def _make_guard(self, **kwargs):
+        from openjarvis.agents.loop_guard import LoopGuard, LoopGuardConfig
+
+        kwargs.setdefault("warn_before_block", False)
+        config = LoopGuardConfig(**kwargs)
+        return LoopGuard(config)
+
+    def test_first_n_minus_1_calls_allowed(self):
+        guard = self._make_guard(max_identical_calls=4)
+        for i in range(3):
+            v = guard.check_call("calc", '{"x": 1}')
+            assert not v.blocked, f"call {i + 1} of 3 (limit 4) should be allowed"
+
+    def test_boundary_call_nth_allowed(self):
+        guard = self._make_guard(max_identical_calls=3)
+        for i in range(3):
+            v = guard.check_call("calc", '{"x": 1}')
+            assert not v.blocked, f"call {i + 1} (the Nth, boundary) should be allowed"
+
+    def test_first_over_limit_call_blocked(self):
+        guard = self._make_guard(max_identical_calls=3)
+        for _ in range(3):
+            guard.check_call("calc", '{"x": 1}')
+        v = guard.check_call("calc", '{"x": 1}')  # (N+1)th
+        assert v.blocked
+        assert "identical" in v.reason.lower()
+
+    def test_reset_clears_identical_call_count(self):
+        guard = self._make_guard(max_identical_calls=1)
+        guard.check_call("calc", '{"x": 1}')
+        v_blocked = guard.check_call("calc", '{"x": 1}')
+        assert v_blocked.blocked
+        guard.reset()
+        v_after_reset = guard.check_call("calc", '{"x": 1}')
+        assert not v_after_reset.blocked
+
+    def test_different_tool_name_does_not_inherit_count(self):
+        """A different tool_name is a different hash entirely -- it must
+        not be blocked by another tool's accumulated identical-call
+        count."""
+        guard = self._make_guard(max_identical_calls=1)
+        guard.check_call("calc", '{"x": 1}')
+        v_blocked = guard.check_call("calc", '{"x": 1}')
+        assert v_blocked.blocked
+        v_other_tool = guard.check_call("search", '{"x": 1}')
+        assert not v_other_tool.blocked
+
+    def test_same_args_string_counts_as_identical(self):
+        guard = self._make_guard(max_identical_calls=2)
+        guard.check_call("calc", '{"x": 1}')
+        guard.check_call("calc", '{"x": 1}')
+        v = guard.check_call("calc", '{"x": 1}')
+        assert v.blocked
+
+    def test_different_args_do_not_count_as_identical(self):
+        guard = self._make_guard(max_identical_calls=1)
+        guard.check_call("calc", '{"x": 1}')
+        v = guard.check_call("calc", '{"x": 2}')
+        assert not v.blocked
+
+    def test_python_fallback_is_deterministic(self):
+        """Same call sequence, two independent guard instances -- must
+        produce identical blocked/warned/reason results, run twice to
+        rule out any hidden nondeterminism (e.g. hash iteration order)."""
+
+        def _run() -> list[bool]:
+            guard = self._make_guard(max_identical_calls=2)
+            return [guard.check_call("calc", '{"x": 1}').blocked for _ in range(4)]
+
+        assert _run() == _run() == [False, False, True, True]
+
+    def test_rust_backend_matches_python_fallback_when_available(self):
+        """Both backends must produce the identical ALLOW/BLOCK sequence
+        for the same (max_identical_calls, call sequence) -- the actual
+        parity this phase exists to certify. Skips cleanly when the
+        compiled Rust extension isn't installed in this environment
+        (confirmed separately via `cargo test` on the Rust crate itself)."""
+        import pytest
+
+        from openjarvis._rust_bridge import get_rust_module
+
+        try:
+            rust = get_rust_module()
+        except Exception:
+            pytest.skip("compiled openjarvis_rust extension not available")
+
+        rust_guard = rust.LoopGuard(max_identical=2, max_ping_pong=100, poll_budget=100)
+        python_guard = self._make_guard(max_identical_calls=2, ping_pong_window=200, poll_tool_budget=100)
+
+        for i in range(4):
+            rust_blocked = rust_guard.check("calc", '{"x": 1}') is not None
+            python_blocked = python_guard.check_call("calc", '{"x": 1}').blocked
+            assert rust_blocked == python_blocked, f"call {i + 1}: rust={rust_blocked} python={python_blocked}"
 
 
 class TestLoopGuardCrossTurnScope:

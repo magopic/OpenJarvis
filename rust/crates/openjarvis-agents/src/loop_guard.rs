@@ -1,11 +1,16 @@
 //! Loop guard — detect and prevent agent loops.
 
 use sha2::{Digest, Sha256};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 #[allow(dead_code)]
 pub struct LoopGuard {
-    seen_hashes: HashSet<String>,
+    // M1.3 -- Loop Guard Parity: counts occurrences per call hash rather
+    // than a HashSet presence flag, so `max_identical` is genuinely
+    // consulted. Mirrors the Python fallback's `_call_counts` dict in
+    // openjarvis/agents/loop_guard.py exactly: up to `max_identical`
+    // identical calls are tolerated, the next one is blocked.
+    call_counts: HashMap<String, usize>,
     recent_calls: VecDeque<String>,
     poll_budget: usize,
     poll_count: usize,
@@ -16,7 +21,7 @@ pub struct LoopGuard {
 impl LoopGuard {
     pub fn new(max_identical: usize, max_ping_pong: usize, poll_budget: usize) -> Self {
         Self {
-            seen_hashes: HashSet::new(),
+            call_counts: HashMap::new(),
             recent_calls: VecDeque::new(),
             poll_budget,
             poll_count: 0,
@@ -29,13 +34,15 @@ impl LoopGuard {
     pub fn check(&mut self, tool_name: &str, arguments: &str) -> Option<String> {
         let hash = self.hash_call(tool_name, arguments);
 
-        // Check identical calls
-        if self.seen_hashes.contains(&hash) {
+        // Check identical calls -- allow up to `max_identical` occurrences
+        // of the same (tool_name, arguments) pair, block strictly after.
+        let count = self.call_counts.entry(hash).or_insert(0);
+        *count += 1;
+        if *count > self.max_identical {
             return Some(format!(
                 "Loop detected: identical call to '{tool_name}' with same arguments"
             ));
         }
-        self.seen_hashes.insert(hash);
 
         // Check ping-pong pattern (A-B-A-B)
         self.recent_calls.push_back(tool_name.to_string());
@@ -72,7 +79,7 @@ impl LoopGuard {
     }
 
     pub fn reset(&mut self) {
-        self.seen_hashes.clear();
+        self.call_counts.clear();
         self.recent_calls.clear();
         self.poll_count = 0;
     }
@@ -98,9 +105,26 @@ mod tests {
 
     #[test]
     fn test_identical_call_detection() {
-        let mut guard = LoopGuard::default();
-        assert!(guard.check("calc", r#"{"expr":"2+2"}"#).is_none());
-        assert!(guard.check("calc", r#"{"expr":"2+2"}"#).is_some());
+        // M1.3 -- Loop Guard Parity: max_identical=N tolerates N identical
+        // calls and blocks the (N+1)th, matching the Python fallback's
+        // semantics exactly (openjarvis/agents/loop_guard.py's
+        // `_python_check`). Uses max_ping_pong/poll_budget large enough
+        // that only the identical-call check can trigger here.
+        let mut guard = LoopGuard::new(2, 100, 100);
+        assert!(guard.check("calc", r#"{"expr":"2+2"}"#).is_none()); // call 1: allowed
+        assert!(guard.check("calc", r#"{"expr":"2+2"}"#).is_none()); // call 2: allowed (boundary)
+        let result = guard.check("calc", r#"{"expr":"2+2"}"#); // call 3: blocked
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("Loop detected"));
+    }
+
+    #[test]
+    fn test_identical_call_reset_allows_again() {
+        let mut guard = LoopGuard::new(1, 100, 100);
+        assert!(guard.check("calc", "1").is_none());
+        assert!(guard.check("calc", "1").is_some());
+        guard.reset();
+        assert!(guard.check("calc", "1").is_none());
     }
 
     #[test]

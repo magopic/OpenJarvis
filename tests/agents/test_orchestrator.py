@@ -670,3 +670,46 @@ class TestOrchestratorParallelTools:
         )
         result = agent.run("What is 2+2?")
         assert result.content == "The answer is 4."
+
+
+class TestLoopGuardParityM13:
+    """M1.3 -- Loop Guard Parity, orchestrator-level certification. The
+    orchestrator's own tool-dispatch loop (identical for sequential and
+    parallel execution) must apply the same frozen semantics as the
+    LoopGuard unit tests: max_identical_calls=N (production default 3,
+    no override -- OrchestratorAgent does not expose a loop_guard_config
+    kwarg) tolerates N identical calls, warns (but still executes) on the
+    (N+1)th (production default warn_before_block=True), and genuinely
+    blocks -- surfaced as a failed ToolResult with a 'Loop guard:' prefix
+    rather than a raised exception or a stalled run -- from the (N+2)th
+    call onward."""
+
+    def test_identical_tool_call_blocked_after_default_limit(self):
+        engine = MagicMock()
+        engine.engine_id = "mock"
+        engine.generate.return_value = {
+            "content": "",
+            "tool_calls": [
+                {"id": "c1", "name": "calculator", "arguments": '{"expression":"2+2"}'}
+            ],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+            "model": "test-model",
+            "finish_reason": "tool_calls",
+        }
+        agent = OrchestratorAgent(
+            engine,
+            "test-model",
+            tools=[_CalculatorStub()],
+            max_turns=6,
+        )
+        result = agent.run("Keep adding 2+2")
+        assert len(result.tool_results) == 6
+        # Calls 1-3 (the default max_identical_calls): under threshold, run normally.
+        # Call 4: first over-threshold trigger -- warned, not blocked, still runs.
+        for tr in result.tool_results[:4]:
+            assert tr.success is True
+            assert tr.content == "4"
+        # Calls 5-6: the warn was already consumed -- now genuinely blocked.
+        for tr in result.tool_results[4:]:
+            assert tr.success is False
+            assert tr.content.startswith("Loop guard:")
