@@ -282,3 +282,43 @@ def test_mcp_tools_can_be_disabled_per_agent() -> None:
 
     assert [tool.spec.name for tool in resolved.instances] == ["shared"]
     assert resolved.mcp_clients == []
+
+
+class _FakeSecondBrainSearchTool(BaseTool):
+    """Stands in for the real second_brain_search tool under test isolation."""
+
+    tool_id = "second_brain_search"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(name="second_brain_search", description="fake")
+
+    def execute(self, **params) -> ToolResult:
+        return ToolResult(
+            tool_name="second_brain_search", content="fake", success=True
+        )
+
+
+def test_managed_agents_do_not_auto_union_maia_families() -> None:
+    """FASE 4Q.5 scope decision, made explicit and tested: unlike
+    ``jarvis chat``/``jarvis serve`` (which auto-union the MAIA
+    conversational tool families -- see cli/_tool_names.py and
+    cli/serve.py::_resolve_allowed_tools), managed agents intentionally
+    keep their own, unrelated contract -- exactly and only the tool names
+    stored in the agent's own record config, with zero automatic
+    unioning. This was diagnosed as a real, structural fourth contract
+    (managed agents never share serve.py's HTTP code path) and was
+    explicitly left unfixed in FASE 4Q.5 rather than silently expanding
+    scope. If this test starts failing because a future phase adds
+    automatic MAIA-family unioning to resolve_agent_tools, that is an
+    intentional, tested change -- update this test to match, don't just
+    delete it."""
+    ToolRegistry.register_value("second_brain_search", _FakeSecondBrainSearchTool)
+
+    resolved = tool_resolver.resolve_agent_tools(
+        {"agent_type": "simple", "config": {"tools": []}},
+        engine=object(),
+        model="test-model",
+    )
+
+    assert "second_brain_search" not in resolved.by_name

@@ -54,7 +54,13 @@ def _resolve_allowed_tools(config: object) -> tuple[set[str], bool]:
 
     Governance-passing OPS Bridge tools (see ops_bridge_generic.py) are
     unioned in regardless of which branch above applies, so they reach chat
-    without being hand-added to config.toml.
+    without being hand-added to config.toml. The MAIA conversational tool
+    families (Second Brain, Document Knowledge, Proactive Insight,
+    Monitoring/Daily Attention, maia_manage, Governed Actions) are unioned
+    in too, mirroring ``cli._tool_names.resolve_tool_names`` -- FASE 4Q.5
+    closed a gap where these were auto-enabled for ``jarvis chat`` but not
+    for ``jarvis serve``, from the same canonical id source
+    (``tools.maia_family_tools``) so neither path duplicates the lists.
     """
     configured = config.tools.enabled or config.agent.tools
     if not configured:
@@ -71,6 +77,14 @@ def _resolve_allowed_tools(config: object) -> tuple[set[str], bool]:
         explicit = True
 
     allowed |= _auto_enabled_ops_tool_ids()
+
+    try:
+        from openjarvis.tools.maia_family_tools import MAIA_FAMILY_TOOL_ID_GROUPS
+
+        allowed.update(*MAIA_FAMILY_TOOL_ID_GROUPS)
+    except Exception:
+        pass
+
     return allowed, explicit
 
 
