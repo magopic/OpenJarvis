@@ -300,19 +300,20 @@ class _FakeSecondBrainSearchTool(BaseTool):
 
 
 def test_managed_agents_do_not_auto_union_maia_families() -> None:
-    """FASE 4Q.5 scope decision, made explicit and tested: unlike
-    ``jarvis chat``/``jarvis serve`` (which auto-union the MAIA
-    conversational tool families -- see cli/_tool_names.py and
-    cli/serve.py::_resolve_allowed_tools), managed agents intentionally
-    keep their own, unrelated contract -- exactly and only the tool names
-    stored in the agent's own record config, with zero automatic
-    unioning. This was diagnosed as a real, structural fourth contract
-    (managed agents never share serve.py's HTTP code path) and was
-    explicitly left unfixed in FASE 4Q.5 rather than silently expanding
-    scope. If this test starts failing because a future phase adds
-    automatic MAIA-family unioning to resolve_agent_tools, that is an
-    intentional, tested change -- update this test to match, don't just
-    delete it."""
+    """FASE 4Q.6 — MAIA Runtime Governance Contract, DELIBERATE security
+    boundary (formalized from the FASE 4Q.5 scope decision, see
+    resolve_agent_tools()'s own docstring): unlike ``jarvis chat``/
+    ``jarvis serve`` (which auto-union the MAIA conversational tool
+    families -- see cli/_tool_names.py and
+    cli/serve.py::_resolve_allowed_tools), managed agents keep their own,
+    unrelated contract -- exactly and only the tool names stored in the
+    agent's own record config, with zero automatic unioning. Managed
+    agents can execute unattended (AgentScheduler ticks), so auto-union
+    would silently widen an unattended process's capability set every
+    time a new MAIA family is added. If this test starts failing because
+    a future phase deliberately adds automatic MAIA-family unioning to
+    resolve_agent_tools, that is an intentional, tested change -- update
+    this test to match, don't just delete it."""
     ToolRegistry.register_value("second_brain_search", _FakeSecondBrainSearchTool)
 
     resolved = tool_resolver.resolve_agent_tools(
@@ -322,3 +323,67 @@ def test_managed_agents_do_not_auto_union_maia_families() -> None:
     )
 
     assert "second_brain_search" not in resolved.by_name
+
+
+class _FakeGovernedActionPrepareTool(BaseTool):
+    """Stands in for the real maia_action_prepare tool under test isolation."""
+
+    tool_id = "maia_action_prepare"
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(name="maia_action_prepare", description="fake")
+
+    def execute(self, **params) -> ToolResult:
+        return ToolResult(
+            tool_name="maia_action_prepare", content="fake", success=True
+        )
+
+
+def test_managed_agents_do_not_auto_grant_governed_actions() -> None:
+    """FASE 4Q.6: the sharpest instance of the boundary above. An
+    unattended managed-agent tick (AgentScheduler fires with no live
+    human present) must never reach a Governed Action tool
+    (maia_action_prepare/request_approval/etc) unless a human explicitly
+    listed it in the agent's own config at creation/update time -- an
+    auto-grant here could let an unattended tick stage an
+    approval-pending action a human later approves by accident in an
+    unrelated conversation (resolve_runtime_principal() is the same
+    deterministic per-OS-account identity for both). This must hold even
+    when the empty-tools config is the same shape a Second Brain/Document
+    Knowledge/Monitoring auto-union might one day use."""
+    ToolRegistry.register_value(
+        "maia_action_prepare", _FakeGovernedActionPrepareTool
+    )
+
+    resolved = tool_resolver.resolve_agent_tools(
+        {"agent_type": "simple", "config": {"tools": []}},
+        engine=object(),
+        model="test-model",
+    )
+
+    assert "maia_action_prepare" not in resolved.by_name
+
+
+def test_explicit_governed_action_grant_is_still_resolvable() -> None:
+    """FASE 4Q.6 explicitly does NOT ban assigning a Governed Action to a
+    managed agent -- it bans the AUTO-grant. A human who deliberately
+    lists a governed tool in config["tools"] must still get it; its
+    execution then remains subject to whatever capability_policy the
+    caller applies (agents/executor.py, server/agent_manager_routes.py),
+    which this test does not need to exercise -- resolve_agent_tools()
+    only decides reachability, not execution-time RBAC."""
+    ToolRegistry.register_value(
+        "maia_action_prepare", _FakeGovernedActionPrepareTool
+    )
+
+    resolved = tool_resolver.resolve_agent_tools(
+        {
+            "agent_type": "simple",
+            "config": {"tools": ["maia_action_prepare"]},
+        },
+        engine=object(),
+        model="test-model",
+    )
+
+    assert "maia_action_prepare" in resolved.by_name

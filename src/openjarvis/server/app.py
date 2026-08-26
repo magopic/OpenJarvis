@@ -164,6 +164,7 @@ def create_app(
     api_key: str = "",
     webhook_config: dict | None = None,
     cors_origins: list[str] | None = None,
+    capability_policy=None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -181,6 +182,12 @@ def create_app(
         Optional channel bridge for multi-platform messaging.
     config:
         Optional JarvisConfig for other settings.
+    capability_policy:
+        Optional RBAC policy (``security.setup_security(...).capability_policy``).
+        FASE 4Q.6: stored on ``app.state`` so managed-agent routes (which
+        build their own agent/tool-executor instances per request, not
+        through the single primary ``agent``) can apply the same policy
+        jarvis ask/serve/chat already do for the primary agent.
     """
     app = FastAPI(
         title="OpenJarvis API",
@@ -227,6 +234,7 @@ def create_app(
     )
     app.state.channel_bridge = channel_bridge
     app.state.config = config
+    app.state.capability_policy = capability_policy
     app.state._memory_backend_lock = threading.Lock()
     app.state.memory_backend = memory_backend
     app.state._owns_memory_backend = bool(own_memory_backend)

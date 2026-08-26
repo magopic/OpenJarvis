@@ -8,7 +8,11 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
-from openjarvis.agents._stubs import AgentResult
+from openjarvis.agents._stubs import (
+    AgentResult,
+    apply_capability_policy,
+    constructor_accepts_kwarg,
+)
 from openjarvis.agents.errors import (
     AgentTickError,
     EscalateError,
@@ -427,16 +431,8 @@ class AgentExecutor:
         # Without this, MonitorOperative/Operative agents have no working
         # session_store or memory_backend and silently no-op their state
         # recall / persistence paths.
-        import inspect
-
-        init_sig = inspect.signature(execution_agent_cls.__init__)
-        accepts_var_kw = any(
-            p.kind == inspect.Parameter.VAR_KEYWORD
-            for p in init_sig.parameters.values()
-        )
-
         def _accepts(name: str) -> bool:
-            return accepts_var_kw or name in init_sig.parameters
+            return constructor_accepts_kwarg(execution_agent_cls, name)
 
         # Unsupported kwargs used to trigger the broad TypeError fallback
         # below, which retried with a bare constructor and silently discarded
@@ -444,6 +440,20 @@ class AgentExecutor:
         # before construction instead.
         if sys_prompt is not None and _accepts("system_prompt"):
             agent_kwargs["system_prompt"] = sys_prompt
+        # FASE 4Q.6: managed-agent ticks never applied capability_policy,
+        # unlike jarvis ask/serve -- an accidental governance gap, not a
+        # documented divergence. The explicit tool grant from
+        # resolve_agent_tools() above remains the first boundary
+        # (unchanged); capability_policy is the second, independent one.
+        # Passed as a constructor kwarg only when the class accepts it --
+        # apply_capability_policy() below is the real guarantee, applied
+        # after construction regardless (some ToolUsingAgent subclasses,
+        # e.g. OrchestratorAgent/NativeReActAgent, don't declare
+        # capability_policy in their own __init__ and would raise
+        # TypeError if it were forced in here).
+        _capability_policy = getattr(self._system, "capability_policy", None)
+        if _capability_policy is not None and _accepts("capability_policy"):
+            agent_kwargs["capability_policy"] = _capability_policy
         agent_kwargs = {
             name: value for name, value in agent_kwargs.items() if _accepts(name)
         }
@@ -516,6 +526,12 @@ class AgentExecutor:
         inner_executor = getattr(agent_instance, "_executor", None)
         if inner_executor is not None and hasattr(inner_executor, "_agent_id"):
             inner_executor._agent_id = agent["id"]
+
+        # FASE 4Q.6: guarantee capability_policy reaches the executor even
+        # if the class doesn't declare it (or construction fell back to a
+        # narrower-signature tier above) -- mirrors the unconditional
+        # _agent_id injection immediately above.
+        apply_capability_policy(agent_instance, _capability_policy)
 
         logger.info(
             "Agent %s: tool wiring — %d tools resolved (%s), agent class %s",

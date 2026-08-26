@@ -380,7 +380,16 @@ def serve(
             if AgentRegistry.contains(agent_key):
                 agent_cls = AgentRegistry.get(agent_key)
                 agent_kwargs = {"bus": bus}
-                if sec.capability_policy is not None:
+                # FASE 4Q.6: passed as a constructor kwarg only when the
+                # class accepts it (e.g. OrchestratorAgent/NativeReActAgent
+                # don't declare it and would raise TypeError);
+                # apply_capability_policy() after construction below is
+                # the real guarantee regardless.
+                from openjarvis.agents._stubs import constructor_accepts_kwarg
+
+                if sec.capability_policy is not None and constructor_accepts_kwarg(
+                    agent_cls, "capability_policy"
+                ):
                     agent_kwargs["capability_policy"] = sec.capability_policy
 
                 # Load tools for agents that support them
@@ -460,6 +469,9 @@ def serve(
                     )
 
                 agent = agent_cls(engine, model_name, **agent_kwargs)
+                from openjarvis.agents._stubs import apply_capability_policy
+
+                apply_capability_policy(agent, sec.capability_policy)
                 # Pin MCP transports to the agent's lifetime so HTTP
                 # connections don't close mid-request (#461).
                 if mcp_clients:
@@ -768,6 +780,7 @@ def serve(
         api_key=api_key,
         webhook_config=webhook_config,
         cors_origins=config.server.cors_origins,
+        capability_policy=sec.capability_policy,
     )
 
     console.print(

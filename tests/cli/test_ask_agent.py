@@ -562,3 +562,70 @@ class TestPersonaFilesReachModel:
         assert result.exit_code == 0, result.output
         messages = engine.generate.call_args.args[0]
         assert "ORCH_PERSONA_SENTINEL" in messages[0].content
+
+
+class TestAskCapabilityPolicyRegression:
+    """FASE 4Q.6 — MAIA Runtime Governance Contract, TEST B / TEST 8.
+
+    ``jarvis ask`` already applied ``capability_policy`` before FASE 4Q.6.
+    This phase touched ask.py's wiring too (see
+    ``agents._stubs.constructor_accepts_kwarg``/``apply_capability_policy``)
+    to fix a latent ``TypeError`` for agent classes (OrchestratorAgent,
+    NativeReActAgent, ...) that don't declare ``capability_policy`` in
+    their own ``__init__`` -- this is a no-regression proof that ask's
+    *observable* behavior (the resolved ``ToolExecutor._capability_policy``)
+    is unchanged for a class that DOES accept it directly.
+
+    Mocks ``setup_security`` directly (mirrors
+    ``tests/cli/test_serve_capability_policy.py``) rather than driving the
+    real, Rust-backed ``CapabilityPolicy`` through config -- that machinery
+    isn't available in every dev/CI environment.
+    """
+
+    def test_capability_policy_reaches_ask_agent_executor(self, runner) -> None:
+        captured_policies: list[object] = []
+
+        class _CapabilityCapturingAskAgent(ToolUsingAgent):
+            agent_id = "capability_capturing_ask_agent"
+
+            def run(self, input, context: AgentContext | None = None, **kwargs):
+                captured_policies.append(self._executor._capability_policy)
+                return AgentResult(content="ok", turns=1)
+
+        from openjarvis.core.config import JarvisConfig
+        from openjarvis.core.registry import AgentRegistry
+
+        engine = _mock_engine("unused")
+        config = JarvisConfig()
+        config.intelligence.default_model = "test-model"
+
+        AgentRegistry.register_value(
+            "capability_capturing_ask_agent",
+            _CapabilityCapturingAskAgent,
+        )
+
+        _policy_sentinel = object()
+        sec = MagicMock()
+        sec.engine = engine
+        sec.capability_policy = _policy_sentinel
+        sec.audit_logger = None
+
+        with (
+            patch.object(_ask_mod, "load_config", return_value=config),
+            patch.object(_ask_mod, "get_engine", return_value=("mock", engine)),
+            patch.object(_ask_mod, "discover_engines", return_value=[("mock", engine)]),
+            patch.object(
+                _ask_mod, "discover_models", return_value={"mock": ["test-model"]}
+            ),
+            patch.object(_ask_mod, "register_builtin_models"),
+            patch.object(_ask_mod, "merge_discovered_models"),
+            patch("openjarvis.security.setup_security", return_value=sec),
+        ):
+            result = runner.invoke(
+                cli,
+                ["ask", "--agent", "capability_capturing_ask_agent", "Hello"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert len(captured_policies) == 1
+        assert captured_policies[0] is _policy_sentinel

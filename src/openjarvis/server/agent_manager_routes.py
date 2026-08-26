@@ -870,6 +870,11 @@ async def _stream_managed_agent(
 
     agent_id = agent_record["id"]
     config = agent_record.get("config", {})
+    # FASE 4Q.6: managed-agent SSE streaming never applied capability_policy,
+    # unlike jarvis ask/serve/chat -- an accidental governance gap. The
+    # explicit tool grant from resolve_agent_tools() below remains the
+    # first, unchanged boundary; this is the second, independent one.
+    capability_policy = getattr(app_state, "capability_policy", None)
     # Resolve the model: prefer the agent's own config, then the server's
     # resolved model (app.state.model — what the engine was booted with),
     # and only then the legacy engine._model attr. OllamaEngine takes the
@@ -990,6 +995,15 @@ async def _stream_managed_agent(
                 )
                 if resolved_toolkit.mcp_clients:
                     dr_agent._mcp_clients = resolved_toolkit.mcp_clients
+                # FASE 4Q.6: DeepResearchAgent.__init__ swallows **kwargs
+                # without forwarding to ToolUsingAgent.__init__, so
+                # capability_policy/agent_id must be set on the already
+                # -constructed executor directly (dr_agent._executor is
+                # accessed the same way a few lines below for progress
+                # tracking).
+                if capability_policy is not None:
+                    dr_agent._executor._capability_policy = capability_policy
+                dr_agent._executor._agent_id = agent_id
 
                 # Wrap the executor to capture tool calls
                 original_execute = dr_agent._executor.execute
@@ -1256,6 +1270,8 @@ async def _stream_managed_agent(
         bus=bus,
         interactive=True,
         confirm_callback=lambda _prompt: True,
+        capability_policy=capability_policy,
+        agent_id=agent_id,
     )
 
     # Forward any per-agent sampler params (repetition_penalty, top_p, …) so

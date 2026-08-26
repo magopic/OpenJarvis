@@ -111,6 +111,17 @@ def chat(
         sys.exit(1)
 
     engine_name, engine = resolved
+
+    # FASE 4Q.6: apply security guardrails (scanners + capability_policy),
+    # mirroring jarvis ask (ask.py:895-898) and jarvis serve
+    # (serve.py:236-238) exactly -- both reassign `engine` to the possibly
+    # security-wrapped one, then reuse `sec.capability_policy` later when
+    # building the agent's kwargs. jarvis chat never did either.
+    from openjarvis.security import setup_security
+
+    sec = setup_security(config, engine, bus)
+    engine = sec.engine
+
     model = model_name or config.intelligence.default_model
     if not model:
         from openjarvis.engine import discover_engines, discover_models
@@ -169,6 +180,19 @@ def chat(
                 agent_cls = AgentRegistry.get(agent_key)
                 kwargs: dict = {"bus": bus}
 
+                # FASE 4Q.6: jarvis chat never applied capability_policy,
+                # unlike jarvis ask/serve -- an accidental gap. Passed as a
+                # constructor kwarg only when the class accepts it (e.g.
+                # OrchestratorAgent/NativeReActAgent don't declare it and
+                # would raise TypeError); apply_capability_policy() below,
+                # after construction, is the real guarantee regardless.
+                from openjarvis.agents._stubs import constructor_accepts_kwarg
+
+                if sec.capability_policy is not None and constructor_accepts_kwarg(
+                    agent_cls, "capability_policy"
+                ):
+                    kwargs["capability_policy"] = sec.capability_policy
+
                 if getattr(agent_cls, "accepts_tools", False):
                     tool_names_list = resolve_tool_names(
                         tools,
@@ -220,6 +244,9 @@ def chat(
                     )
 
                 agent = agent_cls(engine, model, **kwargs)
+                from openjarvis.agents._stubs import apply_capability_policy
+
+                apply_capability_policy(agent, sec.capability_policy)
         except Exception as exc:
             console.print(f"[yellow]Agent '{agent_key}' failed: {exc}[/yellow]")
 

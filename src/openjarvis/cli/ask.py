@@ -412,7 +412,15 @@ def _run_agent(
         agent_kwargs["max_turns"] = config.agent.max_turns
         agent_kwargs["interactive"] = True
         agent_kwargs["confirm_callback"] = lambda prompt: True
-    if capability_policy is not None:
+    # FASE 4Q.6: passed as a constructor kwarg only when the class accepts
+    # it (e.g. OrchestratorAgent/NativeReActAgent don't declare it and
+    # would raise TypeError); apply_capability_policy() after construction
+    # below is the real guarantee regardless.
+    from openjarvis.agents._stubs import constructor_accepts_kwarg
+
+    if capability_policy is not None and constructor_accepts_kwarg(
+        agent_cls, "capability_policy"
+    ):
         agent_kwargs["capability_policy"] = capability_policy
 
     # Wire the SystemPromptBuilder so SOUL.md / MEMORY.md / USER.md persona
@@ -431,6 +439,9 @@ def _run_agent(
         )
 
     agent = agent_cls(engine, model_name, **agent_kwargs)
+    from openjarvis.agents._stubs import apply_capability_policy
+
+    apply_capability_policy(agent, capability_policy)
     # Hold MCP transports alive for the agent's lifetime — without this
     # reference they'd be garbage-collected when this function returns
     # and the underlying HTTP connections would close mid-execution (#461

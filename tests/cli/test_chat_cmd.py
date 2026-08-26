@@ -840,3 +840,116 @@ class TestChatTurnTimeout:
         assert result.exit_code == 0
         assert calls["n"] == 2
         assert "recovered fine" in result.output
+
+
+class TestChatCapabilityPolicy:
+    """FASE 4Q.6 — MAIA Runtime Governance Contract, TEST A.
+
+    ``jarvis chat`` must apply ``capability_policy`` the same way
+    ``jarvis ask``/``jarvis serve`` already do (see
+    ``tests/security/test_security_wiring.py`` for the equivalent
+    lower-level wiring test, and
+    ``tests/agents/test_executor_capability_policy.py``/
+    ``tests/server/test_managed_agent_capability_policy.py`` for the
+    managed-runtime equivalents). This exercises the real, observable
+    behavior -- the resolved ``ToolExecutor._capability_policy`` a
+    constructed agent actually holds -- not merely that a kwarg was
+    passed somewhere.
+    """
+
+    def test_capability_policy_reaches_chat_agent_executor(self) -> None:
+        """TEST 9 (jarvis chat = PASS). Mocks ``setup_security`` directly
+        (like ``tests/cli/test_serve_persona.py``/``test_serve_capability_policy.py``
+        already do for serve) rather than driving the real, Rust-backed
+        ``CapabilityPolicy`` through config -- that machinery isn't
+        available in every dev/CI environment, and this test only needs to
+        prove chat_cmd.py's own wiring, not CapabilityPolicy's internals
+        (covered separately in tests/security/test_capabilities.py)."""
+        captured_policies: list[object] = []
+
+        class _CapabilityCapturingAgent(ToolUsingAgent):
+            agent_id = "capability_capturing_chat_agent"
+
+            def run(self, input, context: AgentContext | None = None, **kwargs):
+                captured_policies.append(self._executor._capability_policy)
+                return AgentResult(content="ok", turns=1)
+
+        engine = MagicMock()
+        engine.engine_id = "mock"
+        config = JarvisConfig()
+        config.intelligence.default_model = "test-model"
+
+        AgentRegistry.register_value(
+            "capability_capturing_chat_agent",
+            _CapabilityCapturingAgent,
+        )
+
+        _policy_sentinel = object()
+        sec = MagicMock()
+        sec.engine = engine
+        sec.capability_policy = _policy_sentinel
+        sec.audit_logger = None
+
+        with (
+            patch("openjarvis.cli.chat_cmd.load_config", return_value=config),
+            patch("openjarvis.engine.get_engine", return_value=("mock", engine)),
+            patch("openjarvis.intelligence.register_builtin_models"),
+            patch("openjarvis.security.setup_security", return_value=sec),
+        ):
+            result = CliRunner().invoke(
+                chat,
+                [
+                    "--agent",
+                    "capability_capturing_chat_agent",
+                    "--model",
+                    "test-model",
+                ],
+                input="hello\n/quit\n",
+            )
+
+        assert result.exit_code == 0
+        assert len(captured_policies) == 1
+        assert captured_policies[0] is _policy_sentinel
+
+    def test_no_capability_policy_when_capabilities_disabled(self) -> None:
+        """Default config (capabilities.enabled=False) must not regress --
+        jarvis chat should stay a no-op RBAC-wise exactly like ask/serve do
+        by default."""
+        captured_policies: list[object] = []
+
+        class _CapabilityCapturingAgent2(ToolUsingAgent):
+            agent_id = "capability_capturing_chat_agent_2"
+
+            def run(self, input, context: AgentContext | None = None, **kwargs):
+                captured_policies.append(self._executor._capability_policy)
+                return AgentResult(content="ok", turns=1)
+
+        engine = MagicMock()
+        engine.engine_id = "mock"
+        config = JarvisConfig()
+        config.intelligence.default_model = "test-model"
+
+        AgentRegistry.register_value(
+            "capability_capturing_chat_agent_2",
+            _CapabilityCapturingAgent2,
+        )
+
+        with (
+            patch("openjarvis.cli.chat_cmd.load_config", return_value=config),
+            patch("openjarvis.engine.get_engine", return_value=("mock", engine)),
+            patch("openjarvis.intelligence.register_builtin_models"),
+        ):
+            result = CliRunner().invoke(
+                chat,
+                [
+                    "--agent",
+                    "capability_capturing_chat_agent_2",
+                    "--model",
+                    "test-model",
+                ],
+                input="hello\n/quit\n",
+            )
+
+        assert result.exit_code == 0
+        assert len(captured_policies) == 1
+        assert captured_policies[0] is None

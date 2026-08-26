@@ -341,6 +341,30 @@ def resolve_agent_tools(
     over configured registry tools, which take precedence over MCP adapters.
     ``config["mcp_tools"] = false`` excludes MCP adapters from this agent;
     process-wide runtimes may still own connections used by other agents.
+
+    FASE 4Q.6 — MAIA Runtime Governance Contract: this is a DELIBERATE
+    security boundary, not merely a deferred parity gap. Unlike
+    ``cli._tool_names.resolve_tool_names``/``cli.serve._resolve_allowed_tools``
+    (the interactive CLI/HTTP runtimes), this function NEVER auto-unions
+    ``tools.maia_family_tools.MAIA_FAMILY_TOOL_ID_GROUPS`` -- most
+    critically it never auto-grants any Governed Action tool
+    (``maia_action_prepare``/``maia_action_request_approval`` etc). Managed
+    agents can run unattended (``agents/scheduler.py::AgentScheduler``
+    fires ticks with no live user present), and ``resolve_runtime_principal()``
+    is the same deterministic per-OS-account identity an interactive
+    session would use -- an auto-granted governed-action tool on an
+    unattended tick could stage an approval-pending action a human later
+    approves by accident in an unrelated conversation. A managed agent
+    reaches ANY tool -- including a governed one -- only via an explicit
+    id in ``agent_record["config"]["tools"]``, set by a human at agent
+    creation/update time, never by the model and never automatically.
+    This is enforced independently of, and in addition to, whatever
+    ``capability_policy`` (RBAC) the caller applies at execution time
+    (see ``agents/executor.py``, ``server/agent_manager_routes.py``) --
+    explicit grant is the first boundary, capability_policy is the second;
+    neither substitutes for the other. See
+    ``tests/agents/test_tool_resolver.py::test_managed_agents_do_not_auto_union_maia_families``
+    and ``::test_managed_agents_do_not_auto_grant_governed_actions``.
     """
 
     ensure_registries_populated()

@@ -19,6 +19,49 @@ from openjarvis.core.types import Conversation, Message, Role, ToolResult
 from openjarvis.engine._stubs import InferenceEngine
 
 
+def constructor_accepts_kwarg(agent_cls: type, name: str) -> bool:
+    """True if ``agent_cls.__init__`` accepts *name* as a keyword argument,
+    explicitly or via ``**kwargs``.
+
+    Concrete ``BaseAgent``/``ToolUsingAgent`` subclasses each declare their
+    own constructor signature (some accept ``system_prompt``/
+    ``session_store``/``capability_policy``, some don't, none accept every
+    optional parameter every caller might want to wire in). Every caller
+    that builds an agent's kwargs dict from a class whose signature varies
+    needs this same check -- shared here instead of reimplemented per
+    caller (FASE 4Q.6; previously only inlined in ``agents/executor.py``).
+    """
+    import inspect
+
+    sig = inspect.signature(agent_cls.__init__)
+    if any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    ):
+        return True
+    return name in sig.parameters
+
+
+def apply_capability_policy(agent: "BaseAgent", capability_policy: Any) -> None:
+    """Ensure *agent*'s ``ToolExecutor`` (if any) holds *capability_policy*.
+
+    Some ``ToolUsingAgent`` subclasses (e.g. ``OrchestratorAgent``,
+    ``NativeReActAgent``) don't declare ``capability_policy`` in their own
+    ``__init__`` and would raise ``TypeError`` if it were passed as a
+    constructor kwarg -- their internal ``ToolExecutor`` is a plain,
+    already-constructed attribute this function can still set directly
+    (RBAC enforcement lives in ``ToolExecutor.execute()``, which only reads
+    ``self._capability_policy`` at call time -- how it got there doesn't
+    matter). A safe no-op for agents with no tool executor at all (e.g.
+    ``SimpleAgent``, which never accepts tools) -- RBAC is meaningless
+    where there is nothing to gate. FASE 4Q.6.
+    """
+    if capability_policy is None:
+        return
+    executor = getattr(agent, "_executor", None)
+    if executor is not None and hasattr(executor, "_capability_policy"):
+        executor._capability_policy = capability_policy
+
+
 @dataclass(slots=True)
 class AgentContext:
     """Runtime context handed to an agent on each invocation."""
