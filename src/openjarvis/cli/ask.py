@@ -708,6 +708,17 @@ def ask(
     capture_screen: bool = False,
 ) -> None:
     """Ask Jarvis a question."""
+    # M1.2 -- Governed Action Approval Binding: one jarvis ask invocation is
+    # one process handling exactly one one-shot query -- bind once, here.
+    # A follow-up "yes" in a SEPARATE ask invocation is a different process
+    # and will correctly never match (ask is stateless by design already;
+    # this does not change that). See governed_actions/session_scope.py.
+    import uuid as _uuid
+
+    from openjarvis.governed_actions.session_scope import bind_runtime_session_scope
+
+    bind_runtime_session_scope(f"cli-ask:{_uuid.uuid4().hex}")
+
     quiet = (ctx.obj or {}).get("quiet", False) or output_json
     print_banner(quiet=quiet)
     console = Console(stderr=True)

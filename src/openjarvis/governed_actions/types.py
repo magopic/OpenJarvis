@@ -93,6 +93,14 @@ class GovernedAction:
     executed_at: Optional[str] = None
     execution_result: Optional[Dict[str, Any]] = None
     failure: Optional[str] = None
+    # M1.2 -- Governed Action Approval Binding. The conversation/session
+    # scope the runtime bound when this action was prepared (see
+    # governed_actions/session_scope.py), or None for an action prepared
+    # where no genuine scope was available (e.g. HTTP serve today, or any
+    # pre-M1.2 legacy row). None is never a wildcard: runtime_hook.py's
+    # matching logic treats a None-scoped action as never auto-approvable
+    # via the generic affirmative-phrase path, fail-closed by design.
+    session_scope: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -112,6 +120,7 @@ class GovernedAction:
             "executed_at": self.executed_at,
             "execution_result": self.execution_result,
             "failure": self.failure,
+            "session_scope": self.session_scope,
         }
 
     @classmethod
@@ -133,6 +142,10 @@ class GovernedAction:
             executed_at=d.get("executed_at"),
             execution_result=d.get("execution_result"),
             failure=d.get("failure"),
+            # Absent for any row persisted before M1.2 -- a legacy row must
+            # default to None (unscoped), never to a value that could
+            # accidentally match a real scope.
+            session_scope=d.get("session_scope"),
         )
 
 

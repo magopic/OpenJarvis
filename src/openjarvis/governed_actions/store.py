@@ -28,9 +28,17 @@ CREATE TABLE IF NOT EXISTS governed_actions (
     approved_by         TEXT,
     executed_at         TEXT,
     execution_result    TEXT,
-    failure             TEXT
+    failure             TEXT,
+    session_scope       TEXT
 );
 """
+
+# M1.2 -- additive, backward-compatible migration for a table created by an
+# older version of this module (before session_scope existed). Mirrors
+# agents/manager.py's exact try/except pattern for the same situation.
+_MIGRATIONS = [
+    "ALTER TABLE governed_actions ADD COLUMN session_scope TEXT",
+]
 
 _CREATE_AUDIT_TABLE = """\
 CREATE TABLE IF NOT EXISTS governed_action_audit (
@@ -57,6 +65,11 @@ class GovernedActionStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute(_CREATE_ACTIONS_TABLE)
         self._conn.execute(_CREATE_AUDIT_TABLE)
+        for migration in _MIGRATIONS:
+            try:
+                self._conn.execute(migration)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         self._conn.commit()
 
     # -- Actions -------------------------------------------------------------
@@ -66,8 +79,9 @@ class GovernedActionStore:
             """INSERT OR REPLACE INTO governed_actions
                (id, principal, capability, arguments, arguments_hash, rationale,
                 status, proposal_id, supporting_evidence, created_at, expires_at,
-                approved_at, approved_by, executed_at, execution_result, failure)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                approved_at, approved_by, executed_at, execution_result, failure,
+                session_scope)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 a["id"],
                 a["principal"],
@@ -85,6 +99,7 @@ class GovernedActionStore:
                 a.get("executed_at"),
                 json.dumps(a["execution_result"]) if a.get("execution_result") is not None else None,
                 a.get("failure"),
+                a.get("session_scope"),
             ),
         )
         self._conn.commit()

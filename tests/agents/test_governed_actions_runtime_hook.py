@@ -10,12 +10,15 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from openjarvis.agents.orchestrator import OrchestratorAgent
 from openjarvis.governed_actions.runtime_hook import (
     detect_and_apply_runtime_approval,
     is_explicit_affirmative,
 )
 from openjarvis.governed_actions.service import GovernedActionService
+from openjarvis.governed_actions.session_scope import bind_runtime_session_scope
 from openjarvis.governed_actions.store import GovernedActionStore
 from openjarvis.governed_actions.types import STATUS_EXECUTED, STATUS_PENDING_APPROVAL
 
@@ -25,6 +28,18 @@ def _svc() -> GovernedActionService:
         store=GovernedActionStore(tempfile.mktemp(suffix=".db")),
         test_notes_path=Path(tempfile.mktemp(suffix=".txt")),
     )
+
+
+@pytest.fixture(autouse=True)
+def _bind_default_test_session_scope():
+    """M1.2: every test in this file exercises a single logical
+    conversation (prepare + approve happen back-to-back, same call
+    stack) -- bind a scope once so the pre-existing "happy path" tests
+    keep asserting exactly what they always did. Tests that specifically
+    exercise cross-session denial bind their OWN distinct scopes inline,
+    overriding this default within their own body."""
+    bind_runtime_session_scope("test-default-session")
+    yield
 
 
 def _turn(content: str = "", finish: str = "stop") -> dict:
@@ -85,6 +100,181 @@ class TestZeroAndSinglePendingDetection:
         event = detect_and_apply_runtime_approval("What is the current OEE?", service=svc)
         assert event is None
         assert svc.get_action(a.id).status == STATUS_PENDING_APPROVAL
+
+
+class TestApprovalBinding:
+    """M1.2 -- Governed Action Approval Binding. Covers the confused-deputy
+    scenarios: an action prepared in one conversation/session must never
+    be auto-approvable by a bare affirmative in a DIFFERENT one, even when
+    both share the same principal (the only dimension the pre-M1.2
+    mechanism checked)."""
+
+    def test_1_same_principal_same_session_approves(self):
+        svc = _svc()
+        bind_runtime_session_scope("session-same")
+        a = svc.prepare_action("maia_test_write_note", {"note": "x"}, rationale="t")
+        svc.request_approval(a.id)
+        event = detect_and_apply_runtime_approval("yes", service=svc)
+        assert event["kind"] == "resolved"
+        assert event["action"].status == STATUS_EXECUTED
+
+    def test_2_same_principal_different_session_denied(self):
+        """The exact confused-deputy scenario: SESSION A prepares, SESSION
+        B (same principal, different conversation) says 'yes' -- must NOT
+        approve."""
+        svc = _svc()
+        bind_runtime_session_scope("session-A")
+        a = svc.prepare_action("maia_test_write_note", {"note": "x"}, rationale="t")
+        svc.request_approval(a.id)
+
+        bind_runtime_session_scope("session-B")
+        event = detect_and_apply_runtime_approval("yes", service=svc)
+        assert event is None
+        assert svc.get_action(a.id).status == STATUS_PENDING_APPROVAL
+
+    def test_3_different_principal_same_session_id_denied(self):
+        """Even if two different principals somehow shared the same
+        session_scope string, list_pending_approval's principal filter
+        (unchanged) means the second principal never even sees the
+        first's pending action."""
+        svc = _svc()
+        bind_runtime_session_scope("shared-scope")
+        a = svc.prepare_action(
+            "maia_test_write_note", {"note": "x"}, rationale="t", principal="user:alice"
+        )
+        svc.request_approval(a.id)
+
+        pending_for_bob = svc.list_pending_approval(principal="user:bob")
+        assert pending_for_bob == []
+        assert svc.get_action(a.id).status == STATUS_PENDING_APPROVAL
+
+    def test_4_missing_session_binding_fails_closed(self):
+        """No runtime ever bound a scope for this call at all (current_scope
+        is None) -- must never match, even though it is the 'only' pending
+        action for this principal."""
+        svc = _svc()
+        bind_runtime_session_scope(None)
+        a = svc.prepare_action("maia_test_write_note", {"note": "x"}, rationale="t")
+        svc.request_approval(a.id)
+        assert a.session_scope is None
+
+        event = detect_and_apply_runtime_approval("yes", service=svc)
+        assert event is None
+        assert svc.get_action(a.id).status == STATUS_PENDING_APPROVAL
+
+    def test_5_managed_tick_pending_interactive_yes_denied(self):
+        """STEP 9's mandatory scenario: a managed-agent tick prepares an
+        action (managed:<agent_id> scope), then an unrelated interactive
+        session (same principal, cli-chat:<uuid> scope) says 'yes' --
+        must NOT approve."""
+        svc = _svc()
+        bind_runtime_session_scope("managed:agent-abc123")
+        a = svc.prepare_action("maia_test_write_note", {"note": "x"}, rationale="t")
+        svc.request_approval(a.id)
+
+        bind_runtime_session_scope("cli-chat:def456")
+        event = detect_and_apply_runtime_approval("yes", service=svc)
+        assert event is None
+        assert svc.get_action(a.id).status == STATUS_PENDING_APPROVAL
+
+    def test_6_two_pending_same_session_ambiguous(self):
+        svc = _svc()
+        bind_runtime_session_scope("session-multi")
+        a1 = svc.prepare_action("maia_test_write_note", {"note": "a"}, rationale="t")
+        a2 = svc.prepare_action("maia_test_write_note", {"note": "b"}, rationale="t")
+        svc.request_approval(a1.id)
+        svc.request_approval(a2.id)
+
+        event = detect_and_apply_runtime_approval("yes", service=svc)
+        assert event["kind"] == "ambiguous"
+        assert svc.get_action(a1.id).status == STATUS_PENDING_APPROVAL
+        assert svc.get_action(a2.id).status == STATUS_PENDING_APPROVAL
+
+    def test_6b_two_pending_different_sessions_not_ambiguous(self):
+        """A pending action from a DIFFERENT session must not count toward
+        this session's ambiguity check -- only same-scope actions are
+        candidates at all."""
+        svc = _svc()
+        bind_runtime_session_scope("session-other")
+        other = svc.prepare_action("maia_test_write_note", {"note": "other"}, rationale="t")
+        svc.request_approval(other.id)
+
+        bind_runtime_session_scope("session-mine")
+        mine = svc.prepare_action("maia_test_write_note", {"note": "mine"}, rationale="t")
+        svc.request_approval(mine.id)
+
+        event = detect_and_apply_runtime_approval("yes", service=svc)
+        assert event["kind"] == "resolved"
+        assert event["action"].id == mine.id
+        assert svc.get_action(other.id).status == STATUS_PENDING_APPROVAL
+
+    def test_7_one_valid_pending_same_session_passes(self):
+        svc = _svc()
+        bind_runtime_session_scope("session-valid")
+        a = svc.prepare_action("maia_test_write_note", {"note": "x"}, rationale="t")
+        svc.request_approval(a.id)
+        event = detect_and_apply_runtime_approval("confermo", service=svc)
+        assert event["kind"] == "resolved"
+        assert event["action"].id == a.id
+
+    def test_11_restart_persistence_preserves_binding(self):
+        """A fresh GovernedActionService instance against the SAME db file
+        (simulating a process restart) must still honor the persisted
+        session_scope -- proving it survived on disk, not just in memory."""
+        db_path = tempfile.mktemp(suffix=".db")
+        notes_path = Path(tempfile.mktemp(suffix=".txt"))
+        svc1 = GovernedActionService(store=GovernedActionStore(db_path), test_notes_path=notes_path)
+        bind_runtime_session_scope("session-restart")
+        a = svc1.prepare_action("maia_test_write_note", {"note": "x"}, rationale="t")
+        svc1.request_approval(a.id)
+
+        # Fresh service instance, same store file -- simulates restart.
+        svc2 = GovernedActionService(
+            store=GovernedActionStore(db_path), test_notes_path=notes_path, register_capabilities=False
+        )
+        reloaded = svc2.get_action(a.id)
+        assert reloaded.session_scope == "session-restart"
+
+        event = detect_and_apply_runtime_approval("yes", service=svc2)
+        assert event["kind"] == "resolved"
+        assert event["action"].status == STATUS_EXECUTED
+
+    def test_12_legacy_pending_without_binding_not_approvable_generically(self):
+        """Simulates a row persisted before M1.2 (no session_scope column
+        value at all) -- must behave exactly like test_4 (fail closed),
+        even with a real scope now bound for the CURRENT call."""
+        svc = _svc()
+        bind_runtime_session_scope("session-legacy-caller")
+        a = svc.prepare_action("maia_test_write_note", {"note": "x"}, rationale="t")
+        svc.request_approval(a.id)
+        # Simulate a legacy row: directly blank out session_scope in storage,
+        # as if it had been persisted before this column existed.
+        d = svc._store.get_action(a.id)
+        d["session_scope"] = None
+        svc._store.save_action(d)
+        assert svc.get_action(a.id).session_scope is None
+
+        event = detect_and_apply_runtime_approval("yes", service=svc)
+        assert event is None
+        assert svc.get_action(a.id).status == STATUS_PENDING_APPROVAL
+
+    def test_13_no_explicit_action_id_approval_bypass_exists(self):
+        """STEP 8: verifies (does not need to build) that no model-callable
+        or otherwise-bypassable path exists that could approve by
+        action_id while skipping principal/session checks -- approve() is
+        still reachable only from detect_and_apply_runtime_approval's own
+        scope-checked selection."""
+        import inspect
+
+        import openjarvis.governed_actions.runtime_hook as hook_mod
+
+        src = inspect.getsource(hook_mod.detect_and_apply_runtime_approval)
+        # The only real call site is "svc.approve(" inside this one
+        # function, downstream of the session_scope filter -- not a
+        # second, parallel entry point. (Counting within the function
+        # body only, not the module docstring, which separately mentions
+        # "approve()" in prose.)
+        assert src.count("svc.approve(") == 1
 
 
 class TestOrchestratorIntegration:

@@ -869,6 +869,18 @@ async def _stream_managed_agent(
     from openjarvis.core.types import Message, Role
 
     agent_id = agent_record["id"]
+    # M1.2 -- Governed Action Approval Binding: same managed:<agent_id>
+    # scope as this agent's own scheduled/manual ticks (agents/executor.py)
+    # -- an action prepared during this SSE conversation remains
+    # approvable by this same managed agent's other execution mode, never
+    # by an unrelated interactive session sharing the same principal.
+    # This function itself never calls detect_and_apply_runtime_approval
+    # (SSE drives its own tool loop, not OrchestratorAgent.run()), but
+    # maia_action_prepare can still be called here, so the scope must
+    # still be bound for that. See governed_actions/session_scope.py.
+    from openjarvis.governed_actions.session_scope import bind_runtime_session_scope
+
+    bind_runtime_session_scope(f"managed:{agent_id}")
     config = agent_record.get("config", {})
     # FASE 4Q.6: managed-agent SSE streaming never applied capability_policy,
     # unlike jarvis ask/serve/chat -- an accidental governance gap. The

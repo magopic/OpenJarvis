@@ -74,6 +74,16 @@ def chat(
     """
     console = Console(stderr=True)
 
+    # M1.2 -- Governed Action Approval Binding: one jarvis chat process is
+    # exactly one conversation for this runtime (a long-lived REPL loop),
+    # so bind once, here, for the whole session -- never per-turn, never
+    # settable by the model. See governed_actions/session_scope.py.
+    import uuid as _uuid
+
+    from openjarvis.governed_actions.session_scope import bind_runtime_session_scope
+
+    bind_runtime_session_scope(f"cli-chat:{_uuid.uuid4().hex}")
+
     config = load_config()
     bus = EventBus(record_history=False)
 

@@ -53,15 +53,43 @@ def detect_and_apply_runtime_approval(
     generation this turn. Returns a dict describing what the runtime did
     (for structural rendering), or None if nothing governed-action-
     related applies this turn -- in which case the orchestrator injects
-    nothing extra and the turn proceeds exactly as it always has."""
+    nothing extra and the turn proceeds exactly as it always has.
+
+    M1.2 -- Governed Action Approval Binding: principal alone is no longer
+    sufficient. ``current_scope`` is this exact call's own runtime-bound
+    conversation/session identity (see governed_actions/session_scope.py).
+    An action only counts as a real candidate for this turn's approval if
+    its OWN bound ``session_scope`` is not None AND equals this call's
+    ``current_scope`` -- also not None. Two unscoped things (current_scope
+    is None, or an action's session_scope is None) never match each other;
+    that would silently reconstruct the exact cross-conversation confusion
+    this mechanism exists to close. This closes the "confused deputy" gap:
+    an action prepared in one conversation (interactive or an unattended
+    managed-agent tick) can no longer be approved by a bare "yes" in a
+    DIFFERENT conversation that merely happens to share the same
+    principal.
+    """
     if not is_explicit_affirmative(user_input):
         return None
 
+    from openjarvis.governed_actions.session_scope import (
+        resolve_runtime_session_scope,
+    )
     from openjarvis.second_brain.identity import resolve_runtime_principal
 
     svc = service or GovernedActionService()
     principal = resolve_runtime_principal()
-    pending: List[GovernedAction] = svc.list_pending_approval(principal=principal)
+    current_scope = resolve_runtime_session_scope()
+
+    all_pending: List[GovernedAction] = svc.list_pending_approval(principal=principal)
+    if current_scope is None:
+        # No genuine session scope was bound by this runtime for this call
+        # (e.g. HTTP serve today, or any other caller that never binds
+        # one) -- fail closed. Never treat "no scope" as "matches
+        # anything" or "matches other no-scope actions".
+        pending: List[GovernedAction] = []
+    else:
+        pending = [a for a in all_pending if a.session_scope == current_scope]
 
     if not pending:
         return None

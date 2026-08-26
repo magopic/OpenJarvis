@@ -652,6 +652,17 @@ class AgentExecutor:
             agent["name"],
             len(input_text),
         )
+        # M1.2 -- Governed Action Approval Binding: this managed agent's own
+        # persistent id is the scope for every tick (and matches the
+        # managed:<agent_id> scope its SSE conversations use too -- see
+        # server/agent_manager_routes.py) -- distinct from any interactive
+        # session sharing the same principal. See
+        # governed_actions/session_scope.py.
+        from openjarvis.governed_actions.session_scope import (
+            bind_runtime_session_scope,
+        )
+
+        bind_runtime_session_scope(f"managed:{agent['id']}")
         _t0 = time.time()
         try:
             result = agent_instance.run(input_text, context=agent_ctx)

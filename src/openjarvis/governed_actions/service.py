@@ -92,13 +92,27 @@ class GovernedActionService:
         supporting_evidence: Optional[List[str]] = None,
         proposal_id: Optional[str] = None,
         principal: Optional[str] = None,
+        session_scope: Optional[str] = None,
     ) -> GovernedAction:
         """Model-callable (via governed_action_tools.py). Creates a
         PROPOSED action -- drafting only, never a step toward approval by
-        itself."""
+        itself.
+
+        M1.2: ``session_scope`` follows the exact same resolution pattern
+        as ``principal`` -- an explicit override is accepted (test-only in
+        practice; no model-callable tool passes one), otherwise it is
+        resolved from the real runtime context via
+        ``resolve_runtime_session_scope()``, never invented here and never
+        settable by the model. See ``governed_actions/session_scope.py``.
+        """
+        from openjarvis.governed_actions.session_scope import (
+            resolve_runtime_session_scope,
+        )
         from openjarvis.second_brain.identity import resolve_runtime_principal
 
         principal = principal or resolve_runtime_principal()
+        if session_scope is None:
+            session_scope = resolve_runtime_session_scope()
         cap = get_capability(capability)
         if cap is None:
             raise GovernedActionError(f"Unknown capability: {capability!r}")
@@ -117,6 +131,7 @@ class GovernedActionService:
             proposal_id=proposal_id,
             supporting_evidence=supporting_evidence or [],
             created_at=_now_iso(),
+            session_scope=session_scope,
         )
         self._store.save_action(action.to_dict())
         self._audit(action, None, "prepared")
