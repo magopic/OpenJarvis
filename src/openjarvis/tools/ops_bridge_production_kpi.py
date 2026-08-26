@@ -19,6 +19,7 @@ import httpx
 from openjarvis.core.registry import ToolRegistry
 from openjarvis.core.types import ToolResult
 from openjarvis.tools._stubs import BaseTool, ToolSpec
+from openjarvis.tools.ops_bridge_generic import _auth_headers
 
 _DEFAULT_BASE_URL = "http://127.0.0.1:3000"
 _CAPABILITY = "ops.production.get_kpi"
@@ -137,6 +138,7 @@ class OpsBridgeProductionKpiTool(BaseTool):
             response = httpx.post(
                 url,
                 json={"capability": _CAPABILITY, "params": bridge_params},
+                headers=_auth_headers(),
                 timeout=_TIMEOUT_SECONDS,
             )
             response.raise_for_status()

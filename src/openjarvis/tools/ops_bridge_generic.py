@@ -37,6 +37,36 @@ _DISCOVERY_TIMEOUT_SECONDS = 2.0
 _CALL_TIMEOUT_SECONDS = 30.0
 _TOOL_ID_PREFIX = "ops_dynamic_"
 
+# M1.1 — OPS Bridge Authentication Boundary. Every OPS Bridge caller was
+# previously anonymous (no headers sent at all); OPS ONE's own
+# src/bridge/auth.ts already implements a dormant service-identity path
+# (x-ops-service-token / x-ops-service-id -> trusted_service principal,
+# gated by OPS_SERVICE_TOKEN being configured server-side) that this client
+# now activates. Deliberately reuses that existing mechanism rather than
+# inventing a new one. Read once per call (not cached) so a credential
+# rotated via environment/process manager takes effect on the next call
+# without a restart-triggered code path.
+_SERVICE_TOKEN_HEADER = "x-ops-service-token"
+_SERVICE_ID_HEADER = "x-ops-service-id"
+_DEFAULT_SERVICE_ID = "openjarvis-maia"
+
+
+def _auth_headers() -> Dict[str, str]:
+    """Service-identity headers for an OPS Bridge call, or {} if unconfigured.
+
+    Fails closed by omission, not by raising: if OPS_BRIDGE_SERVICE_TOKEN is
+    unset, no auth headers are sent at all, and OPS ONE's own dispatcher
+    (which rejects an unauthenticated/anonymous caller before resolving any
+    capability) is what actually enforces the boundary -- this function's
+    job is only to carry the credential when one is configured, never to
+    duplicate that enforcement decision client-side.
+    """
+    token = os.environ.get("OPS_BRIDGE_SERVICE_TOKEN")
+    if not token:
+        return {}
+    service_id = os.environ.get("OPS_BRIDGE_SERVICE_ID", _DEFAULT_SERVICE_ID)
+    return {_SERVICE_TOKEN_HEADER: token, _SERVICE_ID_HEADER: service_id}
+
 # FASE 4L.2C: generic size control for what gets reinjected into the LLM's
 # context on the tool-result turn. The Bridge itself always returns the full
 # envelope untouched (see ToolResult.metadata below) -- only the *summary
@@ -189,6 +219,7 @@ def _call_bridge(capability: str, params: Dict[str, Any]) -> Dict[str, Any]:
     response = httpx.post(
         url,
         json={"capability": capability, "params": params},
+        headers=_auth_headers(),
         timeout=_CALL_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
@@ -335,6 +366,7 @@ def _call_bridge_for_discovery() -> Dict[str, Any]:
     response = httpx.post(
         url,
         json={"capability": _LIST_CAPABILITY, "params": {}},
+        headers=_auth_headers(),
         timeout=_DISCOVERY_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
