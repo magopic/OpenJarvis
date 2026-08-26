@@ -73,6 +73,101 @@ _COVERAGE_FAMILIES = {
     | frozenset({"document_list_sources"}),
 }
 
+# M1.4 -- Multi-Source Degradation Hardening. Documented live failure
+# (docs/MAIA_MULTI_SOURCE_REASONING_V1.md, KNOWN LIMITATIONS): after a
+# repeated-retry sequence LoopGuard eventually stopped, the model's next
+# turn had no tool_calls but its `content` was "a malformed, un-parsed
+# tool-call fragment" rather than a coherent answer -- surfaced verbatim
+# to the user. Root cause is a known, already-handled-elsewhere class of
+# engine/tool-parser mismatch: some backends emit a tool call as
+# ``<tool_call>{...}</tool_call>`` text in `content` instead of a
+# structured `tool_calls` entry (see the identical pattern already
+# recovered in hybrid/toolorchestra.py's `_TOOL_CALL_TAG_RE` and
+# native_openhands.py's `_strip_tool_call_text`/`_parse_action` -- this is
+# the same recovery, applied where OrchestratorAgent's function_calling
+# loop previously had none).
+_TOOL_CALL_TAG_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+
+
+def _recover_leaked_tool_call(content: str, available_tool_names: set) -> Optional[dict]:
+    """If the engine leaked a genuine tool call as ``<tool_call>{...}</tool_call>``
+    text instead of a structured ``tool_calls`` entry, recover it as a real
+    call so it flows through the EXACT SAME downstream path (including the
+    LoopGuard check) as any normally-parsed tool call -- no bypass, no new
+    execution path. Returns None (never invents a tool call) unless the tag
+    is present, its JSON payload parses, and its ``name`` matches a tool
+    genuinely available this turn."""
+    if not content or "<tool_call>" not in content:
+        return None
+    m = _TOOL_CALL_TAG_RE.search(content)
+    if not m:
+        return None
+    try:
+        obj = json.loads(m.group(1))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    name = obj.get("name")
+    args = obj.get("arguments", {})
+    if not isinstance(name, str) or name not in available_tool_names or not isinstance(args, dict):
+        return None
+    return {"id": "recovered_tag_call", "name": name, "arguments": json.dumps(args)}
+
+
+def _looks_like_malformed_final_answer(content: str) -> bool:
+    """True when `content` -- about to be accepted as the FINAL user-facing
+    answer because there are no (real or recovered) tool_calls this turn --
+    is not actually natural language: empty, a leftover unparsed
+    ``<tool_call>`` tag (recovery above already tried and failed on it), or
+    a bare tool-call-shaped JSON object dumped as prose. Deliberately
+    narrow -- must never misclassify a genuine natural-language answer."""
+    stripped = (content or "").strip()
+    if not stripped:
+        return True
+    if "<tool_call>" in stripped:
+        return True
+    if stripped.startswith("{") and stripped.endswith("}"):
+        try:
+            obj = json.loads(stripped)
+        except json.JSONDecodeError:
+            return False
+        if isinstance(obj, dict) and "name" in obj and ("arguments" in obj or "input" in obj):
+            return True
+    return False
+
+
+def _safe_evidence_fallback_answer(evidence) -> str:
+    """Deterministic, non-fabricated final answer for when the model could
+    not produce a coherent one (malformed content, recovery exhausted).
+    States only counts/limitations already present on `evidence` -- never
+    a conclusion, number, or fact not already certified there."""
+    if not evidence.has_any_evidence():
+        return (
+            "I was unable to gather any evidence for this question this turn "
+            "(no operational facts, historical precedent, or document "
+            "references were retrieved), so I can't give a substantiated "
+            "answer. Please rephrase or narrow the question."
+        )
+    parts = []
+    if evidence.facts:
+        parts.append(f"{len(evidence.facts)} operational fact(s)")
+    if evidence.knowledge:
+        parts.append(f"{len(evidence.knowledge)} knowledge definition(s)")
+    if evidence.historical_experience:
+        parts.append(f"{len(evidence.historical_experience)} historical precedent(s)")
+    if evidence.document_evidence:
+        parts.append(f"{len(evidence.document_evidence)} document reference(s)")
+    summary = "I gathered " + ", ".join(parts) + " for this question, "
+    summary += (
+        "but ran into a formatting issue producing a complete answer this "
+        "turn. Please ask again, ideally narrowing the question, so I can "
+        "give you a direct answer from what was found."
+    )
+    if evidence.limitations:
+        summary += " Known gaps: " + "; ".join(evidence.limitations)
+    return summary
+
 
 @AgentRegistry.register("orchestrator")
 class OrchestratorAgent(ToolUsingAgent):
@@ -412,6 +507,7 @@ class OrchestratorAgent(ToolUsingAgent):
         total_completion_tokens = 0
         made_tool_call_last_turn = False
         coverage_nudge_used = False
+        malformed_answer_nudge_used = False
 
         for _turn in range(self._max_turns):
             turns += 1
@@ -449,6 +545,20 @@ class OrchestratorAgent(ToolUsingAgent):
 
             content = result.get("content", "")
             raw_tool_calls = result.get("tool_calls", [])
+
+            # M1.4: recover a tool call the engine leaked as
+            # ``<tool_call>{...}</tool_call>`` text in `content` instead of
+            # a structured `tool_calls` entry (see _recover_leaked_tool_call
+            # above). The recovered call flows through the identical
+            # tool-execution path below -- including the LoopGuard check --
+            # exactly like any normally-parsed call; never a bypass.
+            if not raw_tool_calls and content:
+                recovered = _recover_leaked_tool_call(
+                    content, {t.spec.name for t in self._tools}
+                )
+                if recovered:
+                    raw_tool_calls = [recovered]
+                    content = ""
 
             # No tool calls -> check continuation, then final answer
             if not raw_tool_calls:
@@ -488,6 +598,37 @@ class OrchestratorAgent(ToolUsingAgent):
 
                 content = self._check_continuation(result, messages)
                 content = self._strip_think_tags(content)
+
+                # M1.4 -- Multi-Source Degradation Hardening: never surface
+                # a malformed/empty/tool-call-shaped fragment as the final
+                # answer (see docs/MAIA_MULTI_SOURCE_REASONING_V1.md's
+                # documented live failure). One bounded recovery nudge
+                # first (mirrors the coverage-nudge pattern above); if the
+                # very next attempt is STILL malformed, finalize with a
+                # deterministic, evidence-grounded limitation answer
+                # instead -- never inventing content, never looping.
+                if _looks_like_malformed_final_answer(content):
+                    if not malformed_answer_nudge_used:
+                        malformed_answer_nudge_used = True
+                        messages.append(
+                            Message(
+                                role=Role.USER,
+                                content=(
+                                    "[RESPONSE FORMAT CHECK] Your previous "
+                                    "response was not a valid tool call and "
+                                    "was not a clear answer either. Please "
+                                    "either make one proper tool call, or "
+                                    "give a direct, plain-language final "
+                                    "answer using the evidence already "
+                                    "gathered this turn."
+                                ),
+                            )
+                        )
+                        continue
+                    content = _safe_evidence_fallback_answer(
+                        build_evidence(all_tool_results)
+                    )
+
                 self._emit_turn_end(turns=turns, content_length=len(content))
                 return AgentResult(
                     content=content,
@@ -658,9 +799,15 @@ class OrchestratorAgent(ToolUsingAgent):
 
         # Max turns exceeded
         final_content = self._strip_think_tags(content) if content else ""
+        # M1.4: the same final-answer guard as the normal exit path -- a
+        # malformed/leftover tool-call fragment must never reach the user
+        # just because it happened to be the content of the last turn
+        # before max_turns was hit either.
+        if _looks_like_malformed_final_answer(final_content):
+            final_content = _safe_evidence_fallback_answer(build_evidence(all_tool_results))
         self._emit_turn_end(turns=turns, max_turns_exceeded=True)
         return AgentResult(
-            content=final_content or "Maximum turns reached without a final answer.",
+            content=final_content,
             tool_results=all_tool_results,
             turns=turns,
             metadata={
