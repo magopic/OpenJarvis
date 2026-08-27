@@ -298,13 +298,62 @@ def _classify_second_brain_result(evidence: OperationalEvidence, tr: ToolResult)
             )
 
 
+def _render_document_result_summary(r: Dict[str, Any]) -> str:
+    """M2.5A.1: mirrors _render_second_brain_entry_summary's bracket-
+    append pattern -- Second Brain's own superseded_by signal already
+    survived into its evidence summary that way; Document Knowledge's
+    M2.5A status/supersession fields did not (the exact propagation gap
+    this phase closes). Appends at most one version-state bracket, using
+    only fields the document_search tool already computed -- no new
+    fact, comparison, or diff is made here.
+
+    same_content_as_successor semantics (never a guess):
+      True  -> state plainly the stored content is identical
+      False -> state only that the stored content hash differs --
+               never characterize WHAT differs
+      None  -> no content-equality claim at all
+
+    M2.5A orphaned-supersession repair: when successor_missing is True,
+    a distinct broken-reference bracket is used instead -- the recorded
+    successor no longer resolves (e.g. it was removed from the
+    workspace). This is a broken lifecycle reference, never evidence
+    the predecessor is CURRENT again and never evidence the
+    supersession decision itself should be reversed -- only a
+    deliberate human repair (DocumentKnowledgeService.clear_supersession,
+    via `jarvis document unsupersede`) changes status.
+    """
+    content = str(r.get("content", ""))
+    if r.get("status") != "SUPERSEDED":
+        return content
+
+    if r.get("successor_missing"):
+        return f"{content} [SUPERSEDED -- recorded successor is missing from the workspace; this is a broken reference, not evidence this document is current]"
+
+    successor = r.get("superseded_by_filename") or r.get("superseded_by_doc_id")
+    same_content = r.get("same_content_as_successor")
+    if same_content is True:
+        identity_bit = "; stored content is identical to the successor (same content hash) -- no content difference can be established"
+    elif same_content is False:
+        identity_bit = "; stored content hash differs from the successor -- the nature of the difference is NOT established by this alone"
+    else:
+        identity_bit = ""
+    return f"{content} [SUPERSEDED -- a newer version exists: {successor}{identity_bit}]"
+
+
 def _classify_document_result(evidence: OperationalEvidence, tr: ToolResult) -> None:
     """FASE 4O.6: Document Knowledge results carry no OPS Bridge envelope
     either. Every item is tagged DOCUMENT_EVIDENCE with its real citation
     (filename/page/section) as `provenance` -- exactly what lets the model
     say "According to X, page Y..." instead of presenting the text as its
     own knowledge, and exactly what STEP 12 needs to detect a document
-    number disagreeing with a certified FACT."""
+    number disagreeing with a certified FACT.
+
+    M2.5A.1: also preserves each result's version-state metadata
+    (status/superseded_by_filename/same_content_as_successor) into the
+    rendered summary -- previously dropped here, which meant the
+    structured, per-turn evidence recap (the model's freshest, most
+    repeated context) carried none of it even though the raw tool
+    output did."""
     meta = tr.metadata if isinstance(tr.metadata, dict) else {}
     results = meta.get("results") if isinstance(meta.get("results"), list) else []
 
@@ -321,7 +370,7 @@ def _classify_document_result(evidence: OperationalEvidence, tr: ToolResult) -> 
                 period_status=None,
                 trust_status=None,
                 provenance=r.get("citation"),
-                summary=str(r.get("content", "")),
+                summary=_render_document_result_summary(r),
             )
         )
 

@@ -168,6 +168,43 @@ model — established after auditing what OpenJarvis already has
 if unavailable) and confirming lexical FTS5/BM25 is sufficient for V1's
 scope. See KNOWN LIMITATIONS / FUTURE EMBEDDINGS below.
 
+## DOCUMENT AUTHORITY / SUPERSESSION (M2.5A)
+
+Every ingested document defaults to **CURRENT**. A human (never the
+model) can explicitly mark one document as superseded by another via
+`jarvis document supersede <old> --by <new>` — this sets two additive,
+nullable columns on `file_state.py`'s `files` table
+(`superseded_by_doc_id`, `superseded_at`), never touches
+`knowledge_chunks`, and deletes nothing. The superseded document remains
+fully searchable and citable; `document_search`/`document_list_sources`
+annotate it as `SUPERSEDED` (with the successor's identity) rather than
+hiding or silently ranking it below the current one — no retrieval,
+ranking, FTS, or tokenization behavior changes because of this feature.
+
+Validation (`DocumentKnowledgeService.supersede_document()`) rejects,
+before any write: a missing old or new document, self-supersession, and
+any direct or indirect cycle (a bounded forward walk through the
+proposed successor's own existing supersession chain). There is no
+model-callable equivalent — this is CLI-only, matching Document
+Knowledge's existing all-CLI ingestion boundary (see MODEL-CALLABLE
+TOOLS below).
+
+**`ingested_at` (and the `mtime`-derived `timestamp` field) are never a
+business-effective date** — they record when MAIA indexed the file, not
+when a procedure went into effect. Nothing in this codebase infers an
+"effective date" from filesystem timestamps; if that concept is ever
+needed, it requires its own explicit, human-attested field, deliberately
+not added here.
+
+**Same-path replacement is unchanged and NOT a supersession mechanism.**
+Overwriting a file at the same `relative_path` still hard-deletes the
+old chunks in place (see INGESTION FLOW above) — no history is kept, and
+no `superseded_by_doc_id` is ever set by this path. To preserve a
+revision's history: (1) ingest the new revision under a **distinct**
+filename/path, then (2) explicitly run `jarvis document supersede` to
+link the two. Editing a file in place is for typo/correction fixes to
+the *same* document, not for tracking a new revision.
+
 ## MODEL-CALLABLE TOOLS
 
 `tools/document_knowledge_tools.py`, auto-discovered via
@@ -188,7 +225,9 @@ Enable with `jarvis ask --tools document_search,document_list_sources`
 ## CLI
 
 `jarvis document ingest` / `jarvis document search "<query>"` (JSON) /
-`jarvis document list` (JSON) — see `cli/document_cmd.py`.
+`jarvis document list` (JSON, now includes `status`/`superseded_by_*`) /
+`jarvis document supersede <old> --by <new>` (M2.5A, human-only) — see
+`cli/document_cmd.py`.
 
 ## SECOND BRAIN BOUNDARY
 
@@ -263,7 +302,20 @@ verified live.
   metadata — inherited from `SemanticChunker`'s existing behavior,
   unchanged in this phase.
 - **Single global FTS5 relevance ranking**, no per-document boosting or
-  freshness weighting.
+  freshness weighting. M2.5A's CURRENT/SUPERSEDED status is an inline
+  annotation only — a superseded document is not ranked below a current
+  one; both surface at whatever position FTS5/BM25 places them.
+- **Same-path overwrite still discards history** (M2.5A did not change
+  this — see DOCUMENT AUTHORITY / SUPERSESSION above). Preserving a
+  revision's history requires ingesting it under a new filename and
+  explicitly marking supersession; editing a file in place remains a
+  destructive replace.
+- **No automatic conflict detection between two documents that don't
+  supersede each other.** M2.5A only handles the explicit,
+  human-declared "A is replaced by B" case — two unrelated or
+  independently-disagreeing documents are surfaced with no ranking or
+  warning beyond the model's own general instruction to flag
+  disagreements it notices.
 
 ## FUTURE EMBEDDINGS/RAG PATH
 

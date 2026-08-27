@@ -13,6 +13,7 @@ write path to either system.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from openjarvis.core.registry import ToolRegistry
@@ -23,6 +24,14 @@ from openjarvis.tools._stubs import BaseTool, ToolSpec
 
 def _service() -> DocumentKnowledgeService:
     return DocumentKnowledgeService()
+
+
+def _format_epoch(epoch: Optional[float]) -> str:
+    """Render an ingestion epoch as a plain UTC date -- never labeled or
+    presented as a document's business-effective date (M2.5A)."""
+    if not epoch:
+        return "unknown"
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).date().isoformat()
 
 
 @ToolRegistry.register("document_search")
@@ -57,7 +66,29 @@ class DocumentSearchTool(BaseTool):
                 "page 4...') rather than presenting the text as your own "
                 "knowledge. If nothing relevant is found, say so plainly; do "
                 "not invent a citation or fill in what the document 'probably' "
-                "says."
+                "says. A result marked [SUPERSEDED -- see X instead] is an "
+                "OLDER document revision that a newer one has explicitly "
+                "replaced -- prefer the newer document for current guidance, "
+                "but the superseded text remains a legitimate historical "
+                "answer if the user is specifically asking what an earlier "
+                "revision said. SUPERSEDED is version-state metadata only -- "
+                "it does NOT by itself mean the content changed. When a "
+                "superseded result includes 'stored content is identical to "
+                "the successor', the two documents' content matches exactly; "
+                "say so and do not claim any requirement was added, removed, "
+                "or changed. When it says the content hash differs, you may "
+                "say the stored content differs, but never describe WHAT "
+                "changed unless the actual retrieved text of both documents "
+                "shows it. A result marked [SUPERSEDED -- recorded successor "
+                "is missing from the workspace] means the document that was "
+                "supposed to replace this one is no longer in the workspace "
+                "(e.g. it was removed) -- this is a broken bookkeeping "
+                "reference, not evidence that this older document is current "
+                "again, and not evidence the supersession decision was wrong. "
+                "Say the successor is missing if asked; do not claim this "
+                "document is CURRENT and do not imply the supersession was "
+                "reversed -- only a human explicitly running `jarvis document "
+                "unsupersede` changes that."
             ),
             parameters={
                 "type": "object",
@@ -96,7 +127,26 @@ class DocumentSearchTool(BaseTool):
         summaries = []
         for r in results:
             citation = r.evidence.citation_label()
-            lines.append(f"[{citation}]\n{r.content}")
+            if r.status == "SUPERSEDED" and r.successor_missing:
+                # M2.5A orphaned-supersession repair: the recorded
+                # successor no longer resolves (e.g. removed via
+                # `jarvis document ingest`). Never invent a filename,
+                # never say CURRENT, never imply the supersession
+                # decision was reversed -- a human must run
+                # `jarvis document unsupersede` to do that deliberately.
+                warning = "[SUPERSEDED -- recorded successor is missing from the workspace] "
+            elif r.status == "SUPERSEDED":
+                successor = r.superseded_by_filename or r.superseded_by_doc_id
+                if r.same_content_as_successor is True:
+                    identity_note = " -- stored content is identical to the successor (same content hash)"
+                elif r.same_content_as_successor is False:
+                    identity_note = " -- stored content hash differs from the successor (nature of the difference not established here)"
+                else:
+                    identity_note = ""
+                warning = f"[SUPERSEDED -- see {successor} instead{identity_note}] "
+            else:
+                warning = ""
+            lines.append(f"{warning}[{citation}]\n{r.content}")
             summaries.append(
                 {
                     "citation": citation,
@@ -108,6 +158,12 @@ class DocumentSearchTool(BaseTool):
                     "doc_id": r.evidence.doc_id,
                     "score": r.score,
                     "content": r.content,
+                    "status": r.status,
+                    "superseded_by_doc_id": r.superseded_by_doc_id,
+                    "superseded_by_filename": r.superseded_by_filename,
+                    "superseded_at": r.superseded_at,
+                    "same_content_as_successor": r.same_content_as_successor,
+                    "successor_missing": r.successor_missing,
                 }
             )
 
@@ -135,9 +191,13 @@ class DocumentListSourcesTool(BaseTool):
             name="document_list_sources",
             description=(
                 "List every document currently ingested in the authorized MAIA "
-                "document workspace (filename, type, chunk count). Use this to "
+                "document workspace (filename, type, chunk count, CURRENT/"
+                "SUPERSEDED status, and when it was indexed). Use this to "
                 "check what sources are available before claiming a topic isn't "
-                "covered by any document."
+                "covered by any document. 'Indexed on <date>' is when MAIA "
+                "ingested the file -- it is NOT the document's business-"
+                "effective date; never claim a procedure has been in effect "
+                "since its indexing date."
             ),
             parameters={"type": "object", "properties": {}, "required": []},
             category="knowledge",
@@ -152,12 +212,41 @@ class DocumentListSourcesTool(BaseTool):
                 content="The document workspace is empty -- no documents ingested yet.",
                 metadata={"num_documents": 0},
             )
-        lines = [f"{d.filename} ({d.file_type}, {d.chunk_count} chunks)" for d in docs]
+        lines = []
+        documents_meta = []
+        for d in docs:
+            indexed = _format_epoch(d.ingested_at)
+            if d.status == "SUPERSEDED" and d.successor_missing:
+                status_suffix = " [SUPERSEDED -- recorded successor is missing from the workspace]"
+            elif d.status == "SUPERSEDED":
+                if d.same_content_as_successor is True:
+                    identity_note = ", same content hash as successor"
+                elif d.same_content_as_successor is False:
+                    identity_note = ", different content hash from successor"
+                else:
+                    identity_note = ""
+                status_suffix = f" [SUPERSEDED by {d.superseded_by_filename or d.superseded_by_doc_id}{identity_note}]"
+            else:
+                status_suffix = ""
+            lines.append(f"{d.filename} ({d.file_type}, {d.chunk_count} chunks, indexed {indexed}){status_suffix}")
+            documents_meta.append(
+                {
+                    "relative_path": d.relative_path,
+                    "doc_id": d.doc_id,
+                    "status": d.status,
+                    "ingested_at": d.ingested_at,
+                    "superseded_by_doc_id": d.superseded_by_doc_id,
+                    "superseded_by_filename": d.superseded_by_filename,
+                    "superseded_at": d.superseded_at,
+                    "same_content_as_successor": d.same_content_as_successor,
+                    "successor_missing": d.successor_missing,
+                }
+            )
         return ToolResult(
             tool_name="document_list_sources",
             success=True,
             content="\n".join(lines),
-            metadata={"num_documents": len(docs), "documents": [d.relative_path for d in docs]},
+            metadata={"num_documents": len(docs), "documents": documents_meta},
         )
 
 

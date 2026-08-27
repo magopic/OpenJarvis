@@ -102,10 +102,108 @@ def document_list() -> None:
             "content_hash": d.content_hash,
             "chunk_count": d.chunk_count,
             "ingested_at": d.ingested_at,
+            "status": d.status,
+            "superseded_by_doc_id": d.superseded_by_doc_id,
+            "superseded_by_filename": d.superseded_by_filename,
+            "superseded_at": d.superseded_at,
+            "same_content_as_successor": d.same_content_as_successor,
+            "successor_missing": d.successor_missing,
         }
         for d in docs
     ]
     click.echo(json.dumps(payload, sort_keys=True, ensure_ascii=False, indent=2))
+
+
+@document_group.command("supersede")
+@click.argument("old")
+@click.option("--by", "new", required=True, help="The document that replaces OLD (relative_path or doc_id).")
+def document_supersede(old: str, new: str) -> None:
+    """Mark OLD as superseded by the document given via --by.
+
+    OLD and --by each accept either a relative_path (as ingested) or a
+    doc_id. This is a human-controlled admin operation: it does not
+    ingest, does not delete any chunk, and has no model-callable
+    equivalent (M2.5A -- Document Authority & Supersession V1).
+    Validation runs entirely before any write; on any failure below, the
+    database is left completely unchanged.
+    """
+    from openjarvis.document_knowledge.service import DocumentKnowledgeService, DocumentSupersessionError
+
+    service = DocumentKnowledgeService()
+    try:
+        old_doc_id = service.resolve_doc_id(old)
+        if old_doc_id is None:
+            console.print(f"[red]Not found:[/red] {old!r} does not match any ingested document (path or doc_id).")
+            raise SystemExit(1)
+
+        new_doc_id = service.resolve_doc_id(new)
+        if new_doc_id is None:
+            console.print(f"[red]Not found:[/red] {new!r} does not match any ingested document (path or doc_id).")
+            raise SystemExit(1)
+
+        try:
+            service.supersede_document(old_doc_id, new_doc_id)
+        except DocumentSupersessionError as exc:
+            console.print(f"[red]Rejected:[/red] {exc}")
+            raise SystemExit(1)
+
+        old_doc = service.get_document(old_doc_id)
+        new_doc = service.get_document(new_doc_id)
+    finally:
+        service.close()
+
+    old_label = old_doc.filename if old_doc else old_doc_id
+    new_label = new_doc.filename if new_doc else new_doc_id
+    console.print(f"[green]Marked superseded:[/green] {old_label} -> now SUPERSEDED, replaced by {new_label}")
+    console.print(f"  old doc_id: {old_doc_id}")
+    console.print(f"  new doc_id: {new_doc_id}")
+    console.print(
+        "  Old chunks were NOT deleted -- the old document remains fully "
+        "searchable and retrievable, now annotated as SUPERSEDED."
+    )
+
+
+@document_group.command("unsupersede")
+@click.argument("document")
+def document_unsupersede(document: str) -> None:
+    """Clear DOCUMENT's supersession link, restoring it to CURRENT.
+
+    DOCUMENT accepts either a relative_path (as ingested) or a doc_id.
+    This is a human-controlled admin operation -- it is the repair path
+    for an orphaned supersession (e.g. the recorded successor was
+    removed from the workspace via `jarvis document ingest`), but it is
+    NOT automatic: a missing successor never restores CURRENT status by
+    itself, only this deliberate command does. It does not touch any
+    chunk and does not modify the successor document, if one still
+    exists. Has no model-callable equivalent. Validation runs entirely
+    before any write; on failure, the database is left completely
+    unchanged.
+    """
+    from openjarvis.document_knowledge.service import DocumentKnowledgeService, DocumentSupersessionError
+
+    service = DocumentKnowledgeService()
+    try:
+        doc_id = service.resolve_doc_id(document)
+        if doc_id is None:
+            console.print(
+                f"[red]Not found:[/red] {document!r} does not match any ingested document (path or doc_id)."
+            )
+            raise SystemExit(1)
+
+        try:
+            service.clear_supersession(doc_id)
+        except DocumentSupersessionError as exc:
+            console.print(f"[red]Rejected:[/red] {exc}")
+            raise SystemExit(1)
+
+        doc = service.get_document(doc_id)
+    finally:
+        service.close()
+
+    label = doc.filename if doc else doc_id
+    console.print(f"[green]Supersession cleared:[/green] {label} -> now CURRENT")
+    console.print(f"  doc_id: {doc_id}")
+    console.print("  No chunks were touched; the previously-recorded successor (if any) was not modified.")
 
 
 __all__ = ["document_group"]

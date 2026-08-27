@@ -16,12 +16,13 @@ number without the surrounding document text it came from.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from openjarvis.connectors.store import KnowledgeStore
-from openjarvis.document_knowledge.file_state import FileStateStore
+from openjarvis.document_knowledge.file_state import FileRecord, FileStateStore
 from openjarvis.document_knowledge.types import (
     DocumentChunkResult,
     DocumentEvidenceReference,
@@ -29,6 +30,39 @@ from openjarvis.document_knowledge.types import (
     IngestOutcome,
 )
 from openjarvis.document_knowledge.workspace import default_workspace_root, ensure_workspace_root
+
+
+class DocumentSupersessionError(Exception):
+    """Raised when a requested document->document supersession is invalid
+    (missing target, self-supersession, or would create a cycle). Never
+    raised after any mutation has occurred -- validation runs entirely
+    before the single atomic write in FileStateStore.set_superseded."""
+
+
+_MAX_SUPERSESSION_WALK = 100
+
+
+@dataclass(frozen=True, slots=True)
+class _SupersessionInfo:
+    """Internal helper -- the per-document version-state facts computed
+    by _supersession_info(), unpacked into DocumentChunkResult/
+    DocumentRecord by their respective callers. Not part of the public
+    API of this module."""
+
+    status: str
+    successor_doc_id: Optional[str]
+    successor_filename: Optional[str]
+    superseded_at: Optional[float]
+    same_content_as_successor: Optional[bool]
+    # Orphaned-supersession repair (live-found: the successor file was
+    # removed via `jarvis document ingest`, leaving superseded_by_doc_id
+    # pointing at a doc_id no longer in FileStateStore). True only when
+    # superseded_by_doc_id is set but does not resolve. Deliberately
+    # does NOT imply status should become CURRENT -- a missing successor
+    # is a broken lifecycle reference, not evidence the supersession
+    # decision itself was wrong; only clear_supersession() (a deliberate
+    # human action) can restore CURRENT.
+    successor_missing: bool
 
 
 def _fts5_safe_query(text: str) -> str:
@@ -107,11 +141,18 @@ class DocumentKnowledgeService:
         lexical/full-text retrieval is sufficient... V1 must work without
         downloading a large ML model") -- no embeddings are computed or
         required. Every result includes its ``DocumentEvidenceReference``.
+
+        M2.5A: also attaches document-level authority status (CURRENT/
+        SUPERSEDED) to every result -- superseded evidence is still
+        returned (never silently erased), only annotated. Query
+        construction, ranking, and FTS are untouched by this addition.
         """
         if not query.strip():
             return []
         safe_query = _fts5_safe_query(query)
         raw = self._store.retrieve(safe_query, top_k=max(1, top_k), source="maia_documents")
+
+        by_doc_id = self._file_records_by_doc_id()
 
         results: List[DocumentChunkResult] = []
         for r in raw:
@@ -119,8 +160,9 @@ class DocumentKnowledgeService:
             rel_path = meta.get("relative_path", "")
             if filename is not None and Path(rel_path).name != filename:
                 continue
+            doc_id = meta.get("doc_id", "")
             evidence = DocumentEvidenceReference(
-                doc_id=meta.get("doc_id", ""),
+                doc_id=doc_id,
                 chunk_id=meta.get("chunk_id", ""),
                 workspace_id=meta.get("workspace_id", self._config.workspace_id),
                 relative_path=rel_path,
@@ -130,6 +172,7 @@ class DocumentKnowledgeService:
                 page=meta.get("page"),
                 section=meta.get("section"),
             )
+            info = self._supersession_info(doc_id, by_doc_id)
             results.append(
                 DocumentChunkResult(
                     content=r.content,
@@ -137,31 +180,162 @@ class DocumentKnowledgeService:
                     evidence=evidence,
                     title=meta.get("title", ""),
                     doc_type=meta.get("doc_type", ""),
+                    status=info.status,
+                    superseded_by_doc_id=info.successor_doc_id,
+                    superseded_by_filename=info.successor_filename,
+                    superseded_at=info.superseded_at,
+                    same_content_as_successor=info.same_content_as_successor,
+                    successor_missing=info.successor_missing,
                 )
             )
         return results
 
+    # -- M2.5A: document authority / supersession ---------------------------
+
+    def _file_records_by_doc_id(self) -> Dict[str, FileRecord]:
+        """One scan of the (small) file_state table, reused across every
+        result in a single search_documents/list_documents call -- avoids
+        an O(n) doc_id lookup per result."""
+        return {record.doc_id: record for record in self._file_state.all().values()}
+
+    def _supersession_info(
+        self, doc_id: str, by_doc_id: Optional[Dict[str, FileRecord]] = None
+    ) -> "_SupersessionInfo":
+        index = by_doc_id if by_doc_id is not None else self._file_records_by_doc_id()
+        record = index.get(doc_id)
+        if record is None or not record.superseded_by_doc_id:
+            return _SupersessionInfo("CURRENT", None, None, None, None, False)
+        successor = index.get(record.superseded_by_doc_id)
+        successor_filename = Path(successor.relative_path).name if successor else None
+        # M2.5A.1: a content-identity signal derived entirely from the
+        # whole-file sha256 values already stored in `files` (no new
+        # hash computed, no DB column added -- pure read-time equality
+        # check). None when the successor record can't be resolved
+        # (comparison cannot be established), never a guess.
+        same_content = record.sha256 == successor.sha256 if successor is not None else None
+        # M2.5A orphaned-supersession repair: successor_missing=True
+        # only when superseded_by_doc_id is set (already guaranteed by
+        # this branch) but the referenced doc_id no longer resolves.
+        # status stays SUPERSEDED regardless -- a missing successor file
+        # is never itself treated as reversing the supersession
+        # decision (see clear_supersession() for the only path that does).
+        return _SupersessionInfo(
+            "SUPERSEDED",
+            record.superseded_by_doc_id,
+            successor_filename,
+            record.superseded_at,
+            same_content,
+            successor is None,
+        )
+
+    def resolve_doc_id(self, identifier: str) -> Optional[str]:
+        """Resolve a CLI-supplied identifier to a doc_id -- accepts
+        either a relative_path (looked up directly) or a doc_id (checked
+        for existence). Returns None if neither resolves to a known
+        document."""
+        by_path = self._file_state.get(identifier)
+        if by_path is not None:
+            return by_path.doc_id
+        by_id = self._file_state.get_by_doc_id(identifier)
+        if by_id is not None:
+            return by_id.doc_id
+        return None
+
+    def supersede_document(self, old_doc_id: str, new_doc_id: str) -> None:
+        """Mark ``old_doc_id`` as superseded by ``new_doc_id``.
+
+        Validates entirely before any write (old exists, new exists,
+        old != new, no cycle) -- a rejected call leaves the database
+        completely unchanged. The single UPDATE this performs (via
+        FileStateStore.set_superseded) never touches knowledge_chunks:
+        no evidence is ever deleted by a supersession.
+        """
+        if old_doc_id == new_doc_id:
+            raise DocumentSupersessionError("a document cannot supersede itself")
+
+        old_record = self._file_state.get_by_doc_id(old_doc_id)
+        if old_record is None:
+            raise DocumentSupersessionError(f"old document not found: {old_doc_id!r}")
+
+        new_record = self._file_state.get_by_doc_id(new_doc_id)
+        if new_record is None:
+            raise DocumentSupersessionError(f"new document not found: {new_doc_id!r}")
+
+        # Cycle check: walk forward through new_doc_id's OWN existing
+        # supersession chain. If old_doc_id is reachable, this write
+        # would close a loop (covers both the direct 2-cycle -- new is
+        # already superseded by old -- and any longer indirect chain).
+        cursor = new_record.superseded_by_doc_id
+        seen: set[str] = set()
+        hops = 0
+        while cursor is not None:
+            if cursor == old_doc_id:
+                raise DocumentSupersessionError(
+                    f"supersession would create a cycle: {old_doc_id!r} -> {new_doc_id!r} -> ... -> {old_doc_id!r}"
+                )
+            if cursor in seen or hops >= _MAX_SUPERSESSION_WALK:
+                break  # defensive stop; existing chain already bounded by this same guard
+            seen.add(cursor)
+            hops += 1
+            next_record = self._file_state.get_by_doc_id(cursor)
+            cursor = next_record.superseded_by_doc_id if next_record else None
+
+        self._file_state.set_superseded(
+            old_record.relative_path,
+            superseded_by_doc_id=new_doc_id,
+            superseded_at=time.time(),
+        )
+
+    def clear_supersession(self, doc_id: str) -> None:
+        """Orphaned-supersession repair: clear ``doc_id``'s supersession
+        link, restoring it to CURRENT. A deliberate, human-invoked
+        authority action (CLI-only, see cli/document_cmd.py's
+        ``unsupersede`` command) -- never triggered automatically, in
+        particular never as a side effect of the referenced successor
+        being removed from the workspace. A missing successor is a
+        broken lifecycle reference, not evidence the original
+        supersession decision was wrong (see _supersession_info's
+        successor_missing).
+
+        Validates the document exists before any write -- a rejected
+        call leaves the database completely unchanged. Never touches
+        knowledge_chunks (no chunk is ever deleted) and never modifies
+        any other document's row, including the (possibly still-
+        existing) successor.
+        """
+        record = self._file_state.get_by_doc_id(doc_id)
+        if record is None:
+            raise DocumentSupersessionError(f"document not found: {doc_id!r}")
+        self._file_state.clear_superseded(record.relative_path)
+
     def get_document(self, doc_id: str) -> Optional[DocumentRecord]:
         """File-level provenance for one ingested document."""
-        for rel_path, record in self._file_state.all().items():
-            if record.doc_id == doc_id:
-                row = self._store._conn.execute(
-                    "SELECT COUNT(*) AS c FROM knowledge_chunks WHERE doc_id = ?", (doc_id,)
-                ).fetchone()
-                chunk_count = int(row["c"]) if row else 0
-                return DocumentRecord(
-                    doc_id=doc_id,
-                    workspace_id=self._config.workspace_id,
-                    relative_path=rel_path,
-                    filename=Path(rel_path).name,
-                    file_type=record.file_type,
-                    content_hash=record.sha256,
-                    mtime=record.mtime,
-                    ingested_at=record.ingested_at,
-                    parser_version=record.parser_version,
-                    chunk_count=chunk_count,
-                )
-        return None
+        by_doc_id = self._file_records_by_doc_id()
+        record = by_doc_id.get(doc_id)
+        if record is None:
+            return None
+        row = self._store._conn.execute(
+            "SELECT COUNT(*) AS c FROM knowledge_chunks WHERE doc_id = ?", (doc_id,)
+        ).fetchone()
+        chunk_count = int(row["c"]) if row else 0
+        info = self._supersession_info(doc_id, by_doc_id)
+        return DocumentRecord(
+            doc_id=doc_id,
+            workspace_id=self._config.workspace_id,
+            relative_path=record.relative_path,
+            filename=Path(record.relative_path).name,
+            file_type=record.file_type,
+            content_hash=record.sha256,
+            mtime=record.mtime,
+            ingested_at=record.ingested_at,
+            parser_version=record.parser_version,
+            chunk_count=chunk_count,
+            superseded_by_doc_id=info.successor_doc_id,
+            superseded_by_filename=info.successor_filename,
+            superseded_at=info.superseded_at,
+            same_content_as_successor=info.same_content_as_successor,
+            successor_missing=info.successor_missing,
+        )
 
     def get_document_chunk(self, chunk_id: str) -> Optional[DocumentChunkResult]:
         """A single chunk by id, with full provenance."""
@@ -205,4 +379,9 @@ class DocumentKnowledgeService:
         self._file_state.close()
 
 
-__all__ = ["DocumentKnowledgeService", "DocumentKnowledgeConfig", "default_config"]
+__all__ = [
+    "DocumentKnowledgeService",
+    "DocumentKnowledgeConfig",
+    "DocumentSupersessionError",
+    "default_config",
+]

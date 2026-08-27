@@ -58,18 +58,48 @@ class DocumentEvidenceReference:
 class DocumentChunkResult:
     """One retrieved chunk, always carrying its evidence reference --
     never bare text. Callers (tools, CLI) should never present ``content``
-    without also surfacing ``evidence.citation_label()``."""
+    without also surfacing ``evidence.citation_label()``.
+
+    M2.5A: also carries document-level authority status. ``status`` is
+    CURRENT unless ``superseded_by_doc_id`` is set, in which case it is
+    SUPERSEDED -- callers must surface this rather than presenting
+    superseded evidence as if it were current (see
+    docs/MAIA_DOCUMENT_KNOWLEDGE_V1.md, Document Authority & Supersession
+    V1). This never removes the chunk from results -- superseded evidence
+    remains retrievable, only its authority status changes."""
 
     content: str
     score: float
     evidence: DocumentEvidenceReference
     title: str = ""
     doc_type: str = ""
+    status: str = "CURRENT"
+    superseded_by_doc_id: Optional[str] = None
+    superseded_by_filename: Optional[str] = None
+    superseded_at: Optional[float] = None
+    # M2.5A.1: derived purely from comparing the two documents' already-
+    # stored whole-file sha256 values (FileRecord.sha256) -- no new hash
+    # computed, no diff engine. True/False only when status is
+    # SUPERSEDED and the successor record resolves; None whenever the
+    # comparison cannot be established (CURRENT with no successor, or a
+    # successor record that can't be resolved) -- never guessed.
+    same_content_as_successor: Optional[bool] = None
+    # M2.5A orphaned-supersession repair: True only when status is
+    # SUPERSEDED and the recorded successor doc_id no longer resolves
+    # (e.g. removed via `jarvis document ingest`). Never implies status
+    # should become CURRENT -- only clear_supersession() (a deliberate
+    # human action) can do that.
+    successor_missing: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class DocumentRecord:
-    """Source-file-level provenance for one ingested document."""
+    """Source-file-level provenance for one ingested document.
+
+    M2.5A: ``superseded_by_doc_id``/``superseded_at`` are None for every
+    document by default (CURRENT). ``ingested_at`` (below) is when this
+    record was indexed -- it is NEVER a business-effective date, and must
+    never be presented as one; see docs/MAIA_DOCUMENT_KNOWLEDGE_V1.md."""
 
     doc_id: str
     workspace_id: str
@@ -82,6 +112,15 @@ class DocumentRecord:
     parser_version: str
     chunk_count: int
     metadata: Dict[str, Any] = field(default_factory=dict)
+    superseded_by_doc_id: Optional[str] = None
+    superseded_by_filename: Optional[str] = None
+    superseded_at: Optional[float] = None
+    same_content_as_successor: Optional[bool] = None
+    successor_missing: bool = False
+
+    @property
+    def status(self) -> str:
+        return "SUPERSEDED" if self.superseded_by_doc_id else "CURRENT"
 
 
 @dataclass(slots=True)

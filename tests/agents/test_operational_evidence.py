@@ -247,3 +247,149 @@ def test_insufficient_evidence_all_sources_report_gaps_explicitly():
     evidence = build_evidence([tr_ops, second_brain_empty_result(), document_search_empty_result()])
     assert len(evidence.limitations) == 3
     assert evidence.has_any_evidence() is False
+
+
+# -- M2.5A.1: comparative-grounding propagation (Document Knowledge version-state
+# metadata surviving into the structured, per-turn evidence recap) --------------------
+#
+# Live-reproduced: document_search's raw tool output already carried
+# status/superseded_by_*/same_content_as_successor (M2.5A + M2.5A.1's own
+# service-layer additions), but _classify_document_result() previously
+# rebuilt each summary from only `citation`+`content`, silently dropping
+# all of it -- unlike Second Brain's OWN superseded_by signal, which
+# already survives the equivalent classification step
+# (_render_second_brain_entry_summary). These tests are the direct
+# regression guard for that gap (Step 4.F), plus A-E's data-level
+# equivalents: since there is no reachable inference engine in this
+# environment, "the model must not claim X" is verified here as "the
+# infrastructure the model would need to claim X correctly (or refuse to
+# claim it) is present and correctly rendered" -- actual model behavior
+# is certified separately, live, by the user.
+
+
+def test_a_identical_content_pair_status_and_identity_signal_survive_into_recap():
+    """Test A -- CURRENT+SUPERSEDED with identical content hashes: status,
+    successor filename, and same_content_as_successor=True must all
+    survive into the rendered evidence summary, not just the raw tool
+    output."""
+    hit = make_document_hit(
+        status="SUPERSEDED",
+        superseded_by_doc_id="doc-b",
+        superseded_by_filename="procedure_b.pdf",
+        superseded_at=1787778105.0,
+        same_content_as_successor=True,
+    )
+    evidence = build_evidence([document_search_result([hit])])
+    summary = evidence.document_evidence[0].summary
+    assert "SUPERSEDED" in summary
+    assert "procedure_b.pdf" in summary
+    assert "identical" in summary
+    # The rendering must never assert a specific difference for an
+    # identical-content pair.
+    for word in ("introduced", "removed", "added", "replaced"):
+        assert word not in summary
+
+
+def test_b_different_hashes_may_state_differs_but_never_the_nature_of_it():
+    """Test B -- CURRENT+SUPERSEDED with different hashes:
+    same_content_as_successor=False may only say the stored content
+    differs, never characterize WHAT changed (this renderer has no
+    access to any actual diff, so it must not invent one)."""
+    hit = make_document_hit(
+        status="SUPERSEDED",
+        superseded_by_doc_id="doc-b",
+        superseded_by_filename="procedure_b.pdf",
+        superseded_at=1787778105.0,
+        same_content_as_successor=False,
+    )
+    evidence = build_evidence([document_search_result([hit])])
+    summary = evidence.document_evidence[0].summary
+    assert "SUPERSEDED" in summary
+    assert "differs" in summary
+    assert "identical" not in summary
+    for word in ("introduced", "removed", "added", "replaced", "new requirement"):
+        assert word not in summary
+
+
+def test_c_superseded_status_alone_implies_no_content_equality_claim():
+    """Test C -- SUPERSEDED status with no resolvable content-identity
+    signal (same_content_as_successor=None, e.g. a dangling successor
+    reference) must state the version relationship without any implied
+    content-equality or content-difference claim."""
+    hit = make_document_hit(
+        status="SUPERSEDED",
+        superseded_by_doc_id="doc-b",
+        superseded_by_filename="procedure_b.pdf",
+        superseded_at=1787778105.0,
+        same_content_as_successor=None,
+    )
+    evidence = build_evidence([document_search_result([hit])])
+    summary = evidence.document_evidence[0].summary
+    assert "SUPERSEDED" in summary
+    assert "identical" not in summary
+    assert "differs" not in summary
+
+
+def test_d_current_document_no_successor_carries_no_comparison_claim():
+    """Test D -- a CURRENT document with no successor (the common case,
+    and the honest representation of "no historical comparison is even
+    possible here") must carry no supersession bracket and no
+    content-equality claim at all."""
+    hit = make_document_hit(status="CURRENT", same_content_as_successor=None)
+    evidence = build_evidence([document_search_result([hit])])
+    summary = evidence.document_evidence[0].summary
+    assert "SUPERSEDED" not in summary
+    assert "identical" not in summary
+    assert "differs" not in summary
+    assert summary == hit["content"]  # byte-identical to the raw chunk text
+
+
+def test_e_single_document_query_unchanged_behavior():
+    """Test E -- a document hit carrying no status/supersession fields at
+    all (the exact shape every document_search result had before M2.5A)
+    must render identically to pre-M2.5A.1 behavior."""
+    hit = make_document_hit()  # no status/superseded_* keys present
+    evidence = build_evidence([document_search_result([hit])])
+    assert evidence.document_evidence[0].summary == hit["content"]
+
+
+def test_f_classify_document_result_propagation_regression():
+    """Test F -- direct regression guard for the propagation gap this
+    phase closes: status, superseded_by_filename, and
+    same_content_as_successor must all be present in the rendered
+    summary text, not silently dropped as they were before this fix."""
+    hit = make_document_hit(
+        status="SUPERSEDED",
+        superseded_by_doc_id="doc-b",
+        superseded_by_filename="successor.pdf",
+        superseded_at=1787778105.0,
+        same_content_as_successor=True,
+    )
+    evidence = build_evidence([document_search_result([hit])])
+    summary = evidence.document_evidence[0].summary
+    assert "SUPERSEDED" in summary
+    assert "successor.pdf" in summary
+    assert "identical" in summary
+
+
+def test_5_classify_document_result_preserves_successor_missing():
+    """M2.5A orphaned-supersession repair -- Test 5: the structured
+    evidence recap must preserve successor_missing, using a distinct
+    broken-reference wording rather than the ordinary 'a newer version
+    exists' bracket, and must never claim CURRENT status or imply the
+    supersession decision was reversed."""
+    hit = make_document_hit(
+        status="SUPERSEDED",
+        superseded_by_doc_id="doc-b",
+        superseded_by_filename=None,
+        superseded_at=1787778105.0,
+        same_content_as_successor=None,
+        successor_missing=True,
+    )
+    evidence = build_evidence([document_search_result([hit])])
+    summary = evidence.document_evidence[0].summary
+    assert "SUPERSEDED" in summary
+    assert "missing from the workspace" in summary
+    assert "CURRENT" not in summary
+    assert "identical" not in summary
+    assert "differs" not in summary

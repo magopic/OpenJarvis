@@ -157,6 +157,32 @@ If exactly one referent is clearly dominant from the conversation, proceed norma
 If two or more referents remain materially plausible AND the next step would create or modify persistent state (e.g. creating a monitor, saving a record, taking an action) rather than just answering a question, ask one concise clarification question before taking that step, naming the candidates so the user can pick. Never create or modify persistent state against a guessed referent to avoid asking one question -- the cost of a wrong persistent action is higher than the cost of asking.
 """
 
+# M2.5A.1 -- a fourth, equally generic rule, addressing a distinct
+# failure mode from the three above: not "is this claim backed by a
+# tool result" (rule 1), "which TIME does this evidence describe" (rule
+# 2), or "whose task does a follow-up refer to" (rule 3), but "does a
+# document's CURRENT/SUPERSEDED version-state label license a claim
+# about what changed." A live certification found the model told to
+# compare a CURRENT document against its SUPERSEDED predecessor
+# invented a specific, plausible-sounding difference ("the new version
+# introduced X") even when the two documents were byte-identical --
+# the version-state label alone was pattern-completed into "something
+# must have changed." No business vocabulary, no domain-specific
+# example -- correct and harmless in a session with no Document
+# Knowledge supersession in play at all.
+_DOCUMENT_COMPARISON_RULE = """## Document Version Comparison
+
+A document being marked CURRENT or SUPERSEDED describes its position in a version history -- it is version-state metadata, not evidence that the two documents' content actually differs. Do not treat "superseded" as proof that anything changed.
+
+When asked to compare a current document against a superseded one (or any two document versions):
+
+- State only differences that are directly supported by retrieved evidence -- text you can actually see in both documents, or an explicit metadata signal a tool result provided.
+- Never claim a newer version "introduced", "removed", "changed", "added", or "replaced" a specific requirement, section, or detail unless that specific comparison is supported by what was actually retrieved.
+- If a tool result includes an explicit content-identity signal (e.g. a field like `same_content_as_successor`) and it indicates the two documents' stored content matches, treat that as strong evidence that no substantive difference can be established between those documents -- state that plainly rather than inventing one.
+- If that same signal indicates the stored content differs, you may say the two versions' stored content differs -- but still do not describe WHAT changed unless the actual retrieved text shows it.
+- If no such signal is available and you have not retrieved enough of both documents to compare them, say explicitly that a difference cannot be established from the evidence gathered, rather than filling the gap with a plausible-sounding guess.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class PromptSection:
@@ -323,6 +349,14 @@ class SystemPromptBuilder:
             PromptSection(
                 name="referent_continuity_discipline",
                 content=_REFERENT_CONTINUITY_RULE,
+                source="builtin",
+                cache_segment="frozen_prefix",
+            )
+        )
+        sections.append(
+            PromptSection(
+                name="document_comparison_discipline",
+                content=_DOCUMENT_COMPARISON_RULE,
                 source="builtin",
                 cache_segment="frozen_prefix",
             )

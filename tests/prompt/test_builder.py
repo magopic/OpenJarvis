@@ -194,6 +194,7 @@ def test_sections_expose_prompt_metadata(memory_dir: Path):
         "tool_grounding_discipline",
         "historical_evidence_discipline",
         "referent_continuity_discipline",
+        "document_comparison_discipline",
         "current_time",
         "soul",
         "memory",
@@ -201,8 +202,8 @@ def test_sections_expose_prompt_metadata(memory_dir: Path):
         "session_context",
         "previous_state",
     ]
-    assert sections[5].source == str(memory_dir / "SOUL.md")
-    assert sections[5].cache_segment == "frozen_prefix"
+    assert sections[6].source == str(memory_dir / "SOUL.md")
+    assert sections[6].cache_segment == "frozen_prefix"
     assert sections[-1].cache_segment == "dynamic_suffix"
     assert builder.build() == "\n\n".join(section.content for section in sections)
 
@@ -282,6 +283,35 @@ def test_referent_continuity_discipline_present_and_distinguishes_roles(memory_d
     assert "recency is not selection" in referent.content
     assert "explicitly picked it" in referent.content
     assert "ask one concise clarification question" in referent.content
+
+
+def test_document_comparison_discipline_present_and_grounds_version_claims(memory_dir: Path):
+    """M2.5A.1 -- live certification finding: comparing a CURRENT document
+    against its SUPERSEDED predecessor, MAIA claimed the newer version
+    "introduced" content that did not actually differ (the two documents
+    were byte-identical). The rule must say plainly that supersession
+    status is not evidence of a content change, that a same_content
+    signal indicating identical content rules out any difference claim,
+    and that a differing-hash signal alone never licenses describing
+    WHAT changed."""
+    from openjarvis.prompt.builder import SystemPromptBuilder
+
+    builder = SystemPromptBuilder(
+        agent_template="You are Jarvis.",
+        memory_files_config=MemoryFilesConfig(
+            soul_path=str(memory_dir / "SOUL.md"),
+            memory_path=str(memory_dir / "MEMORY.md"),
+            user_path=str(memory_dir / "USER.md"),
+        ),
+        system_prompt_config=SystemPromptConfig(),
+    )
+    sections = builder.sections()
+    comparison = next(s for s in sections if s.name == "document_comparison_discipline")
+    assert "not evidence that the two documents' content actually differs" in comparison.content
+    assert "same_content_as_successor" in comparison.content
+    assert "no substantive difference can be established" in comparison.content
+    assert "do not describe WHAT changed unless the actual retrieved text shows it" in comparison.content
+    assert "cannot be established from the evidence gathered" in comparison.content
 
 
 def _builder_with_now(memory_dir: Path, now):
@@ -364,7 +394,8 @@ def test_a5_existing_frozen_sections_present_and_ordered(memory_dir: Path):
     names = [s.name for s in builder.sections()]
     assert names.index("tool_grounding_discipline") < names.index("historical_evidence_discipline")
     assert names.index("historical_evidence_discipline") < names.index("referent_continuity_discipline")
-    assert names.index("referent_continuity_discipline") < names.index("current_time")
+    assert names.index("referent_continuity_discipline") < names.index("document_comparison_discipline")
+    assert names.index("document_comparison_discipline") < names.index("current_time")
     assert names.index("current_time") < names.index("soul")
 
 
