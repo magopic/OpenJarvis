@@ -206,6 +206,21 @@ def _domain_from_tool_name(tool_name: str) -> Optional[str]:
     return stripped
 
 
+def _evidence_references_bit(refs: Any) -> str:
+    """M2.5B Phase 1: renders the same [UNVERIFIED] semantic
+    second_brain_tools.py already computes at read time (each ref
+    dict's own "verification_status" key, never re-derived here) into
+    the structured evidence recap -- closing the same propagation-gap
+    class M2.5A.1 already fixed once for Document Knowledge. Returns
+    "" when there is nothing to disclose (entry carries no references)."""
+    if not isinstance(refs, list) or not refs:
+        return ""
+    labels = [f"{r.get('capability')} [{r.get('verification_status', 'UNVERIFIED')}]" for r in refs if isinstance(r, dict)]
+    if not labels:
+        return ""
+    return "[evidence_references (stored, NOT independently re-verified): " + "; ".join(labels) + "]"
+
+
 def _render_second_brain_entry_summary(entry: Dict[str, Any]) -> str:
     """One line per entry, preserving type/lifecycle/match-basis -- never
     collapsed into free prose that would lose the PROBLEM/DECISION/
@@ -217,6 +232,9 @@ def _render_second_brain_entry_summary(entry: Dict[str, Any]) -> str:
         bits.append(f"[superseded_by={entry.get('superseded_by')} -- a newer version exists]")
     if "outcome_backed" in entry:
         bits.append(f"[outcome_backed={entry.get('outcome_backed')}]")
+    evidence_bit = _evidence_references_bit(entry.get("evidence_references"))
+    if evidence_bit:
+        bits.append(evidence_bit)
     return " ".join(bits)
 
 
@@ -230,10 +248,14 @@ def _render_second_brain_candidate_summary(cand: Dict[str, Any]) -> str:
         basis_parts.append(f"term={cand['matched_terms']}")
     if cand.get("relationship_basis"):
         basis_parts.append(f"relationship=[{'; '.join(cand['relationship_basis'])}]")
-    return (
+    text = (
         f"[{cand.get('entry_id')}] ({cand.get('type')}, {cand.get('active_or_superseded')}) "
         f"matched via {cand.get('retrieval_level')}: {', '.join(basis_parts) or 'n/a'}"
     )
+    evidence_bit = _evidence_references_bit(cand.get("evidence_references"))
+    if evidence_bit:
+        text += " " + evidence_bit
+    return text
 
 
 def _classify_second_brain_result(evidence: OperationalEvidence, tr: ToolResult) -> None:

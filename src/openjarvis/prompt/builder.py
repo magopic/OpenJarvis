@@ -183,6 +183,29 @@ When asked to compare a current document against a superseded one (or any two do
 - If no such signal is available and you have not retrieved enough of both documents to compare them, say explicitly that a difference cannot be established from the evidence gathered, rather than filling the gap with a plausible-sounding guess.
 """
 
+# M2.5B Phase 1 -- a fifth, equally generic rule, addressing a distinct
+# failure mode: not "is this a current document's content" (rule 4)
+# but "does a Second Brain memory's stored evidence_references field
+# make its claim itself certified." Second Brain memory entries can
+# optionally carry an evidence_references field -- a pointer the
+# entry's author recorded to an operational capability at capture time.
+# Nothing in this codebase re-checks that pointer against live state,
+# session history, or the memory's own claim -- so its mere presence
+# (or the memory's own trust_status) must never be read as proof. No
+# business vocabulary, no domain-specific example -- correct and
+# harmless in a session with no Second Brain evidence references in
+# play at all.
+_SECOND_BRAIN_EVIDENCE_REFERENCE_RULE = """## Second Brain Evidence Reference Honesty
+
+A Second Brain memory entry may carry an evidence_references field -- a pointer its author recorded to an operational capability at the time the memory was captured. This is a historical bookkeeping note, not independently re-verified evidence: nothing re-checks it against live state, and nothing confirms it was actually retrieved in the current conversation.
+
+Every evidence_references entry you see is marked UNVERIFIED. Treat that label literally:
+
+- Do not present a stored evidence_references entry as proof the underlying evidence still exists, is current, or actually supports the memory's claim.
+- The memory entry's own trust_status (e.g. VERIFIED, DECISION) does NOT verify its evidence_references -- the two are independent. A VERIFIED memory with a stored reference is still exactly as unverified on that reference as a HYPOTHESIS with one.
+- If you need current proof of an operational fact, call the appropriate live tool (an ops_dynamic_* capability, or Document Knowledge) yourself in this conversation -- a stored Second Brain reference is never a substitute for that.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class PromptSection:
@@ -357,6 +380,14 @@ class SystemPromptBuilder:
             PromptSection(
                 name="document_comparison_discipline",
                 content=_DOCUMENT_COMPARISON_RULE,
+                source="builtin",
+                cache_segment="frozen_prefix",
+            )
+        )
+        sections.append(
+            PromptSection(
+                name="second_brain_evidence_reference_discipline",
+                content=_SECOND_BRAIN_EVIDENCE_REFERENCE_RULE,
                 source="builtin",
                 cache_segment="frozen_prefix",
             )

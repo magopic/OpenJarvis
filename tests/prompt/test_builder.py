@@ -195,6 +195,7 @@ def test_sections_expose_prompt_metadata(memory_dir: Path):
         "historical_evidence_discipline",
         "referent_continuity_discipline",
         "document_comparison_discipline",
+        "second_brain_evidence_reference_discipline",
         "current_time",
         "soul",
         "memory",
@@ -202,8 +203,8 @@ def test_sections_expose_prompt_metadata(memory_dir: Path):
         "session_context",
         "previous_state",
     ]
-    assert sections[6].source == str(memory_dir / "SOUL.md")
-    assert sections[6].cache_segment == "frozen_prefix"
+    assert sections[7].source == str(memory_dir / "SOUL.md")
+    assert sections[7].cache_segment == "frozen_prefix"
     assert sections[-1].cache_segment == "dynamic_suffix"
     assert builder.build() == "\n\n".join(section.content for section in sections)
 
@@ -314,6 +315,31 @@ def test_document_comparison_discipline_present_and_grounds_version_claims(memor
     assert "cannot be established from the evidence gathered" in comparison.content
 
 
+def test_second_brain_evidence_reference_discipline_present_and_grounds_verification_claims(memory_dir: Path):
+    """M2.5B Phase 1 -- Test G: the new rule must be present in the
+    generated prompt (not merely defined), and must say plainly that a
+    stored evidence_references pointer is UNVERIFIED regardless of the
+    memory entry's own trust_status -- the core authority rule
+    (evidence_reference != evidence_verified)."""
+    from openjarvis.prompt.builder import SystemPromptBuilder
+
+    builder = SystemPromptBuilder(
+        agent_template="You are Jarvis.",
+        memory_files_config=MemoryFilesConfig(
+            soul_path=str(memory_dir / "SOUL.md"),
+            memory_path=str(memory_dir / "MEMORY.md"),
+            user_path=str(memory_dir / "USER.md"),
+        ),
+        system_prompt_config=SystemPromptConfig(),
+    )
+    sections = builder.sections()
+    rule = next(s for s in sections if s.name == "second_brain_evidence_reference_discipline")
+    assert "UNVERIFIED" in rule.content
+    assert "does NOT verify its evidence_references" in rule.content
+    assert "VERIFIED memory with a stored reference is still exactly as unverified" in rule.content
+    assert rule.content in builder.build()  # actually emitted, not merely defined
+
+
 def _builder_with_now(memory_dir: Path, now):
     from openjarvis.prompt.builder import SystemPromptBuilder
 
@@ -395,7 +421,8 @@ def test_a5_existing_frozen_sections_present_and_ordered(memory_dir: Path):
     assert names.index("tool_grounding_discipline") < names.index("historical_evidence_discipline")
     assert names.index("historical_evidence_discipline") < names.index("referent_continuity_discipline")
     assert names.index("referent_continuity_discipline") < names.index("document_comparison_discipline")
-    assert names.index("document_comparison_discipline") < names.index("current_time")
+    assert names.index("document_comparison_discipline") < names.index("second_brain_evidence_reference_discipline")
+    assert names.index("second_brain_evidence_reference_discipline") < names.index("current_time")
     assert names.index("current_time") < names.index("soul")
 
 

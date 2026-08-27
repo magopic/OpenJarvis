@@ -125,7 +125,29 @@ def _entry_summary(
     }
     if entry.type is EntryType.LESSON or entry.trust_status.value == "LEARNED":
         result["outcome_backed"] = service.is_outcome_backed(entry.id)
+    if entry.evidence_references:
+        result["evidence_references"] = [_evidence_reference_summary(ref) for ref in entry.evidence_references]
     return result
+
+
+def _evidence_reference_summary(ref: EvidenceReference) -> Dict[str, Any]:
+    """M2.5B Phase 1 -- render-time-only representation of a stored
+    EvidenceReference. ``verification_status`` is computed here, never
+    stored: this codebase has no mechanism (yet) that re-checks a
+    reference against live OPS Bridge/session state, so it is ALWAYS
+    "UNVERIFIED" today, regardless of the memory entry's own
+    trust_status. See docs/MAIA_SECOND_BRAIN_V1.md, Evidence Reference
+    Honest Rendering V1 -- evidence_reference != evidence_verified."""
+    return {
+        "capability": ref.capability,
+        "domain": ref.domain,
+        "metric": ref.metric,
+        "period": ref.period,
+        "filters": ref.filters,
+        "trust_status_at_capture": ref.trust_status_at_capture,
+        "fetched_at": ref.fetched_at,
+        "verification_status": "UNVERIFIED",
+    }
 
 
 def _render_entry_text(s: Dict[str, Any]) -> str:
@@ -162,6 +184,13 @@ def _render_entry_text(s: Dict[str, Any]) -> str:
         lines.append("  [ARCHIVED]")
     if s.get("superseded_by"):
         lines.append(f"  superseded_by={s['superseded_by']} (a newer version exists -- prefer it)")
+    if s.get("evidence_references"):
+        lines.append("  evidence_references (stored with this memory, NOT independently re-verified):")
+        for ref in s["evidence_references"]:
+            lines.append(
+                f"    - [UNVERIFIED] capability={ref.get('capability')} domain={ref.get('domain')} "
+                f"metric={ref.get('metric')} period={ref.get('period')}"
+            )
     return "\n".join(lines)
 
 
@@ -205,7 +234,11 @@ class SecondBrainSearchTool(BaseTool):
                 "Returns confirmed entries only -- proposals awaiting confirmation "
                 "never appear here. PRIVATE entries not belonging to the caller "
                 "running this tool are silently excluded -- there is no parameter "
-                "to search as a different identity."
+                "to search as a different identity. If a result includes "
+                "evidence_references, each is marked [UNVERIFIED] -- it is a "
+                "pointer the memory's author recorded, never independently "
+                "re-checked by MAIA; do not treat it as proof the underlying "
+                "evidence still exists, is current, or matches the claim."
             ),
             parameters={
                 "type": "object",
@@ -603,6 +636,30 @@ class SecondBrainFindRelatedExperiencesTool(BaseTool):
         self._service = service or _service()
         self._principal = principal or resolve_runtime_principal()
 
+    def _evidence_refs_for(self, entry_id: str) -> List[Dict[str, Any]]:
+        """M2.5B Phase 1: candidates/bundle stages from
+        find_related_experiences carry only match-basis fields (see
+        second_brain/retrieval.py's RetrievalCandidate/
+        ExperienceBundleItem -- neither has an evidence_references
+        field, and extending them would mean touching service.py's
+        find_related_experiences internals, out of this phase's scope).
+        This fetches the full entry via the existing, unmodified
+        get_entry() read to surface its evidence_references honestly,
+        exactly like second_brain_search/second_brain_get already do --
+        bounded by the same _DEFAULT_MAX_CANDIDATES/
+        _DEFAULT_MAX_BUNDLE_ENTRIES limits that already cap this tool's
+        result set. Never raises -- a resolution failure here is not
+        this tool's job to report, and it already couldn't have entered
+        `candidates`/`bundle.stages` in the first place if genuinely
+        inaccessible."""
+        try:
+            entry = self._service.get_entry(entry_id, actor=self._principal)
+        except SecondBrainValidationError:
+            return []
+        if entry is None or not entry.evidence_references:
+            return []
+        return [_evidence_reference_summary(ref) for ref in entry.evidence_references]
+
     @property
     def spec(self) -> ToolSpec:
         return ToolSpec(
@@ -682,6 +739,12 @@ class SecondBrainFindRelatedExperiencesTool(BaseTool):
                 f"[{c.entry_id}] ({c.historical_entry_type}, {c.active_or_superseded}) "
                 f"{c.title} -- matched via {c.retrieval_level}: {', '.join(basis_parts) or 'n/a'}"
             )
+            candidate_entry_refs = self._evidence_refs_for(c.entry_id)
+            if candidate_entry_refs:
+                lines.append(
+                    "    evidence_references (stored with this memory, NOT independently re-verified): "
+                    + "; ".join(f"[UNVERIFIED] {ref['capability']}" for ref in candidate_entry_refs)
+                )
             candidate_dicts.append(
                 {
                     "entry_id": c.entry_id,
@@ -692,6 +755,7 @@ class SecondBrainFindRelatedExperiencesTool(BaseTool):
                     "relationship_basis": c.relationship_basis,
                     "active_or_superseded": c.active_or_superseded,
                     "type": c.historical_entry_type,
+                    **({"evidence_references": candidate_entry_refs} if candidate_entry_refs else {}),
                 }
             )
 
@@ -703,11 +767,18 @@ class SecondBrainFindRelatedExperiencesTool(BaseTool):
         try:
             bundle = self._service.get_experience_bundle(top.entry_id, actor=self._principal)
             if len(bundle.stages) > 1:
-                bundle_lines = [
-                    f"  [{s.entry_id}] ({s.type}, trust={s.trust_status}) {s.title} -- "
-                    f"{s.summary} [{s.relationship_basis}] provenance: {s.provenance}"
-                    for s in bundle.stages
-                ]
+                bundle_lines = []
+                for s in bundle.stages:
+                    line = (
+                        f"  [{s.entry_id}] ({s.type}, trust={s.trust_status}) {s.title} -- "
+                        f"{s.summary} [{s.relationship_basis}] provenance: {s.provenance}"
+                    )
+                    stage_refs = self._evidence_refs_for(s.entry_id)
+                    if stage_refs:
+                        line += "\n    evidence_references (NOT independently re-verified): " + "; ".join(
+                            f"[UNVERIFIED] {ref['capability']}" for ref in stage_refs
+                        )
+                    bundle_lines.append(line)
                 bundle_text = (
                     f"\n\nExperience chain for top match [{top.entry_id}]"
                     + (" (truncated -- more stages exist)" if bundle.truncated else "")

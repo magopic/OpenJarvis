@@ -199,6 +199,11 @@ def render_frontmatter(entry: SecondBrainEntry, *, outcome_backed: Optional[bool
             lines.append(f"    trust_status_at_capture: {_yaml_scalar(ref.trust_status_at_capture)}")
             if ref.fetched_at:
                 lines.append(f"    fetched_at: {ref.fetched_at}")
+            # M2.5B Phase 1: computed at render time only, never stored --
+            # nothing in this codebase re-checks a reference against live
+            # state, so it is always UNVERIFIED today regardless of the
+            # entry's own trust_status.
+            lines.append("    verification_status: UNVERIFIED")
     lines.append("---")
     return "\n".join(lines)
 
@@ -284,13 +289,18 @@ def render_entry_note(
     if entry.evidence_references:
         for ref in entry.evidence_references:
             lines.append(
-                f"- `{ref.capability}` — domain={ref.domain}, metric={ref.metric}, "
+                f"- **[UNVERIFIED]** `{ref.capability}` — domain={ref.domain}, metric={ref.metric}, "
                 f"period={ref.period}, trust_status_at_capture={ref.trust_status_at_capture or 'n/a'}"
             )
         lines.append("")
         lines.append(
             "*(References point back to the certified capability -- no numeric "
-            "value is ever copied into the Second Brain or this projection.)*"
+            "value is ever copied into the Second Brain or this projection. "
+            "UNVERIFIED means this pointer was recorded with the memory but "
+            "has NOT been independently re-checked against live state -- it "
+            "is not proof the referenced evidence still exists, is current, "
+            "or matches this entry's claim, even if this entry's own "
+            "trust_status is VERIFIED.)*"
         )
     else:
         lines.append("*(none)*")
