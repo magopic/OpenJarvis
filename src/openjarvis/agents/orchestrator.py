@@ -508,6 +508,17 @@ class OrchestratorAgent(ToolUsingAgent):
         made_tool_call_last_turn = False
         coverage_nudge_used = False
         malformed_answer_nudge_used = False
+        # M2.4 Stage 2C: per-family, not conversation-global -- a single
+        # shared bool let one family's zero-result recovery (e.g. Second
+        # Brain) permanently consume the "fires once" budget, silently
+        # locking out a completely unrelated family's OWN independent
+        # zero-result situation arising later in the same conversation
+        # (live-reproduced: Document Knowledge came back empty after
+        # Second Brain had already been recovered, and never got its own
+        # nudge). Each family label may appear in this set at most once;
+        # still hard-bounded overall since there are only ever as many
+        # families as _COVERAGE_FAMILIES has entries.
+        zero_result_retried_families: set[str] = set()
 
         for _turn in range(self._max_turns):
             turns += 1
@@ -572,6 +583,26 @@ class OrchestratorAgent(ToolUsingAgent):
                 # _ROUTING_MAX_EXPANSIONS pattern above). A missing source
                 # remains an acceptable outcome: the nudge text explicitly
                 # permits finalizing without it and forbids guessing.
+                #
+                # M2.4 -- Cross-Source Claim Coverage: the family-level check
+                # above is unchanged (still "was this family touched at all
+                # this session"), but the nudge text below no longer offers
+                # an unconditional escape hatch. A live-reproduced failure
+                # showed a compound question (e.g. "who cleans X, and who
+                # moves Y") get a document_search-only answer that silently
+                # dropped the Second Brain half, because the old wording
+                # ("if not, it is fine to finalize without it") let the
+                # model decline an unattempted family without ever checking
+                # whether the ORIGINAL question still had an unaddressed
+                # part that family could cover. No new decomposition/
+                # planner logic is added -- the model itself already has
+                # the original question and its own draft answer in
+                # context, and is asked to self-certify completeness
+                # against that, rather than being handed a blanket
+                # permission slip. Single-source questions are unaffected:
+                # `unattempted_families` is computed exactly as before, so
+                # a question that only ever needed one family still never
+                # triggers this at all.
                 if not coverage_nudge_used:
                     available_names = {t.spec.name for t in self._tools}
                     attempted_names = {tr.tool_name for tr in all_tool_results}
@@ -587,14 +618,125 @@ class OrchestratorAgent(ToolUsingAgent):
                             "that the following evidence sources are available "
                             "this session but have not been checked yet: "
                             + "; ".join(unattempted_families)
-                            + ". If your answer would genuinely benefit from "
-                            "one of them, you may check it now. If not, it is "
-                            "fine to finalize your answer without it -- do not "
-                            "call a source that is not relevant, and do not "
-                            "guess at what it would say."
+                            + f". Re-read the user's ORIGINAL question: {input!r}. "
+                            "Does your answer so far genuinely address every "
+                            "distinct part of it? If any distinct part remains "
+                            "unanswered and one of the unattempted sources above "
+                            "could plausibly cover it, check that source now "
+                            "before finalizing. If your answer already covers "
+                            "every part of the original question, it is fine to "
+                            "finalize without checking further -- do not call a "
+                            "source that is not relevant to any part of the "
+                            "question, and do not guess at what it would say."
                         )
                         messages.append(Message(role=Role.USER, content=nudge))
                         continue
+
+                # M2.4 Stage 2 -- Zero-Result Retrieval Recovery: Stage 1
+                # above only tracks whether a family's tool was CALLED
+                # (`attempted_names`), not whether it ever returned
+                # evidence. Both second_brain_search and document_search
+                # return success=True, metadata={"num_results": 0} on a
+                # genuine zero-match -- indistinguishable from a real hit
+                # at Stage 1's bookkeeping level. Live-reproduced: the
+                # model tried Second Brain once with an over-specific
+                # query, got zero results, and finalized declaring that
+                # part of the question unavailable, even though the same
+                # entry was independently retrievable with a broader
+                # query in the same runtime state. Only evaluated once
+                # Stage 1 finds nothing left unattempted (every family
+                # has at least one call this turn). A tool failure, a
+                # non-search tool (e.g. document_list_sources, which
+                # reports `num_documents` not `num_results`), or any
+                # result missing the `num_results` key is never counted
+                # as "empty evidence" -- only a genuine, successful,
+                # zero-count search does.
+                #
+                # M2.4 Stage 2C: bounded PER FAMILY
+                # (`zero_result_retried_families`), not conversation-
+                # global. A single shared bool let one family's recovery
+                # (e.g. Second Brain) permanently consume the "fires
+                # once" budget, silently locking out a completely
+                # unrelated family's OWN independent zero-result
+                # situation arising later (live-reproduced: Document
+                # Knowledge came back empty only after Second Brain had
+                # already been recovered, and never got its own nudge).
+                # Each family can still receive at most one recovery
+                # nudge ever, advisory, model judges actual relevance --
+                # only the SCOPE of "at most once" changed, from global
+                # to per-family; still hard-bounded overall (at most as
+                # many extra turns as _COVERAGE_FAMILIES has entries).
+                attempted_names_now = {tr.tool_name for tr in all_tool_results}
+                empty_family_snippets = []
+                families_to_mark_retried = []
+                for label, names in _COVERAGE_FAMILIES.items():
+                    if label in zero_result_retried_families:
+                        continue
+                    family_results = [tr for tr in all_tool_results if tr.tool_name in names]
+                    counts = [
+                        tr.metadata.get("num_results")
+                        for tr in family_results
+                        if tr.success
+                        and isinstance(tr.metadata, dict)
+                        and "num_results" in tr.metadata
+                    ]
+                    if not (counts and all(c == 0 for c in counts)):
+                        continue
+                    families_to_mark_retried.append(label)
+                    # M2.4 Stage 2B: Second Brain has a second,
+                    # purpose-built broadening tool
+                    # (second_brain_find_related_experiences --
+                    # deterministic EXACT/STRUCTURED/TERM(OR)/
+                    # RELATIONSHIP widening, already certified in M2.2
+                    # to retrieve the same entries under different
+                    # wording) that second_brain_search's own strict,
+                    # implicit-AND FTS match (frozen since FASE
+                    # 4N.2A, never touched here) cannot. Live-
+                    # reproduced: the model retried the empty family
+                    # with the SAME strict tool (or didn't retry at
+                    # all) rather than escalating to the tool
+                    # actually meant for "find this under different
+                    # wording." Name it explicitly only when it
+                    # genuinely hasn't been tried yet -- if it HAS
+                    # already run and still found nothing, there is
+                    # no further tool to escalate to, so this falls
+                    # back to the same generic wording used for
+                    # Document Knowledge (which has no equivalent
+                    # broadening tool at all).
+                    if (
+                        label == "historical experience (Second Brain)"
+                        and "second_brain_find_related_experiences" not in attempted_names_now
+                    ):
+                        empty_family_snippets.append(
+                            "Second Brain was searched via second_brain_search "
+                            "but returned no results. You have not yet tried "
+                            "second_brain_find_related_experiences, which is "
+                            "specifically intended to find relevant historical "
+                            "experiences under different wording (it broadens "
+                            "automatically by domain/entity/term/relationship, "
+                            "unlike second_brain_search's exact-word matching). "
+                            "If a part of the user's original question is still "
+                            "unresolved, try that tool now using the relevant "
+                            "domain/entity/context from the question before "
+                            "finalizing."
+                        )
+                    else:
+                        empty_family_snippets.append(f"{label} returned no results.")
+                if empty_family_snippets:
+                    zero_result_retried_families.update(families_to_mark_retried)
+                    nudge = (
+                        "[EVIDENCE COVERAGE CHECK] "
+                        + " ".join(empty_family_snippets)
+                        + f" Re-read the user's ORIGINAL question: {input!r}. "
+                        "If a distinct part of it is still unaddressed and a "
+                        "broader or differently-worded search could plausibly "
+                        "cover it, try that once now before finalizing. If you "
+                        "have already tried a reasonably broad search, it is "
+                        "fine to finalize now and state plainly that nothing "
+                        "relevant was found -- do not guess."
+                    )
+                    messages.append(Message(role=Role.USER, content=nudge))
+                    continue
 
                 content = self._check_continuation(result, messages)
                 content = self._strip_think_tags(content)
