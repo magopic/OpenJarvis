@@ -95,11 +95,27 @@ def _entry_summary(
     returned full Relationship objects at the service layer) -- no
     schema change, reusing the frozen relationships table as-is.
     """
+    # M2.5C Phase 1: service.get_relationships() is a raw, unfiltered
+    # read (no visibility check on either endpoint) -- resolving each
+    # neighbor through the SAME principal-scoped access path
+    # (service.get_entry(..., actor=actor)) that already gates this
+    # entry itself, and omitting the relationship entirely when the
+    # neighbor isn't visible, closes the leak this raw read would
+    # otherwise create. Mirrors second_brain/projections/obsidian.py's
+    # _relationship_line(), which already does exactly this. Full
+    # omission, not a placeholder -- a placeholder like "[HIDDEN]"
+    # would itself confirm the relationship exists.
     rels = service.get_relationships(entry.id, direction="both")
     relationships = []
     for rel in rels:
         is_outgoing = rel.source_entry_id == entry.id
         related_id = rel.target_entry_id if is_outgoing else rel.source_entry_id
+        try:
+            neighbor = service.get_entry(related_id, actor=actor)
+        except SecondBrainValidationError:
+            neighbor = None
+        if neighbor is None:
+            continue
         relationships.append(
             {
                 "relationship_id": rel.id,
@@ -165,6 +181,16 @@ def _render_entry_text(s: Dict[str, Any]) -> str:
     into this string.
     """
     lines = [f"[{s['id']}] ({s['type']}, trust={s['trust_status']}) {s['title']} -- {s['summary']}"]
+    if s.get("visibility") in ("TEAM", "COMPANY"):
+        # M2.5C Phase 1: honesty only, no new enforcement -- this
+        # runtime has no team/org/tenant membership primitive
+        # (Phase 0 finding), so TEAM/COMPANY behave identically to
+        # each other and to "not PRIVATE" today. PRIVATE is unchanged
+        # and gets no such note.
+        lines.append(
+            f"  visibility={s['visibility']} (stored label only -- this runtime has no "
+            "group-membership authorization for TEAM/COMPANY; do not treat as access-controlled)"
+        )
     if s.get("domains") or s.get("entities"):
         lines.append(f"  domains={s.get('domains') or []} entities={s.get('entities') or []}")
     if "outcome_backed" in s:
@@ -554,11 +580,47 @@ class SecondBrainLinkTool(BaseTool):
             category="memory",
         )
 
+    def _is_readable(self, entry_id: str) -> bool:
+        """M2.5C Phase 1: service.create_relationship() only checks that
+        both entries EXIST (a raw, unfiltered store read) -- it never
+        checks whether the caller is authorized to read them, making it
+        an existence oracle / unauthorized-mutation path against a
+        PRIVATE entry someone else owns. This reuses the exact same
+        principal-scoped access path get/search already enforce
+        (service.get_entry(..., actor=...)) entirely at the tool layer
+        -- no change to create_relationship() or its existence check,
+        which still runs redundantly afterward and is harmless."""
+        try:
+            entry = self._service.get_entry(entry_id, actor=self._principal)
+        except SecondBrainValidationError:
+            return False
+        return entry is not None
+
     def execute(self, **params: Any) -> ToolResult:
+        source_entry_id = params.get("source_entry_id", "")
+        target_entry_id = params.get("target_entry_id", "")
+
+        # Deliberately the SAME denial message for "does not exist" and
+        # "exists but not authorized" -- distinguishing the two would
+        # itself be an existence oracle against entries the caller
+        # cannot read.
+        if not self._is_readable(source_entry_id):
+            return ToolResult(
+                tool_name="second_brain_link",
+                success=False,
+                content=f"Cannot reference source_entry_id {source_entry_id!r}: not found or not accessible.",
+            )
+        if not self._is_readable(target_entry_id):
+            return ToolResult(
+                tool_name="second_brain_link",
+                success=False,
+                content=f"Cannot reference target_entry_id {target_entry_id!r}: not found or not accessible.",
+            )
+
         try:
             rel = self._service.create_relationship(
-                source_entry_id=params.get("source_entry_id", ""),
-                target_entry_id=params.get("target_entry_id", ""),
+                source_entry_id=source_entry_id,
+                target_entry_id=target_entry_id,
                 relation_type=params.get("relation_type"),
                 source=params.get("source", ""),
                 created_by=self._principal,
