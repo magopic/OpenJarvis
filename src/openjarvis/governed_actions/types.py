@@ -50,11 +50,22 @@ RISK_HIGH = "HIGH"
 RISK_PROHIBITED = "PROHIBITED"
 VALID_RISK_CLASSES = frozenset({RISK_LOW, RISK_MEDIUM, RISK_HIGH, RISK_PROHIBITED})
 
-# Only LOW-risk capabilities actually execute in V1 (STEP 7). MEDIUM/HIGH
-# may be registered and exercised structurally by tests, but
-# GovernedActionService.execute() refuses them. PROHIBITED never executes,
-# ever, regardless of any future change to this set.
-_EXECUTABLE_IN_V1 = frozenset({RISK_LOW})
+# FASE 4P.3 scoped this to {RISK_LOW} only -- deliberately, since that
+# phase's only registered capability was a synthetic local test action.
+# FASE 4P.4 explicitly, deliberately extends this to {RISK_LOW, RISK_HIGH}
+# to connect the FIRST real external capability (Microsoft Graph email
+# send, HIGH risk by design -- a real, irreversible communication to a
+# third party). This is a conscious widening, not a loosening of the
+# actual safety boundary: the safety guarantee was never "risk tier X
+# cannot run," it was, and remains, "nothing runs without a real,
+# runtime-verified, principal-bound, hash-immutable human approval" --
+# every invariant STEP 3-14 of FASE 4P.3 established (principal binding,
+# argument-hash immutability, idempotency, audit, claim integrity, no
+# model self-approval) applies identically regardless of risk class.
+# RISK_MEDIUM stays deliberately unconnected (no registered capability
+# uses it yet). PROHIBITED never executes, ever, regardless of any
+# future change to this set.
+_EXECUTABLE_IN_V1 = frozenset({RISK_LOW, RISK_HIGH})
 
 DEFAULT_APPROVAL_TTL_SECONDS = 900  # STEP 16 -- bounded, configurable per call
 

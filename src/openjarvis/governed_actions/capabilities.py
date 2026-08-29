@@ -34,6 +34,15 @@ class CapabilityDefinition:
     timeout_seconds: float = 10.0
     rollback_capability: Optional[str] = None
     handler: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None
+    # FASE 4P.4: an optional, capability-specific validation hook, run at
+    # prepare_action() time (not only at execute() time) -- returns an
+    # error string to reject, or None to accept. Generic type-checking
+    # (validate_arguments below) stays capability-agnostic; this lets a
+    # capability like outlook_send_email reject a malformed recipient
+    # address immediately when drafted, rather than only discovering it
+    # after the user has already approved (STEP 7: "if recipient identity
+    # is ambiguous: STOP and ask" -- as early as possible, not at send time).
+    argument_validator: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None
 
 
 _REGISTRY: Dict[str, CapabilityDefinition] = {}
@@ -55,7 +64,16 @@ def validate_arguments(cap: CapabilityDefinition, arguments: Dict[str, Any]) -> 
     """Returns an error string if arguments don't satisfy the
     capability's schema, else None. Simple type-name checking -- no
     arbitrary code, no eval, no reflection beyond `type(value).__name__`."""
-    _TYPE_MAP = {"str": str, "int": int, "float": (int, float), "bool": bool}
+    # FASE 4P.4: added "list_str" for capabilities like outlook_send_email's
+    # `to` (a list of recipient strings) -- still simple type-name checking,
+    # no arbitrary code/eval/reflection beyond isinstance().
+    _TYPE_MAP = {
+        "str": str,
+        "int": int,
+        "float": (int, float),
+        "bool": bool,
+        "list_str": list,
+    }
     for req in cap.required_arguments:
         if req not in arguments:
             return f"Missing required argument: {req!r}"
@@ -65,6 +83,8 @@ def validate_arguments(cap: CapabilityDefinition, arguments: Dict[str, Any]) -> 
         expected = _TYPE_MAP.get(cap.argument_schema[key])
         if expected is not None and not isinstance(value, expected):
             return f"Argument {key!r} must be of type {cap.argument_schema[key]!r}"
+    if cap.argument_validator is not None:
+        return cap.argument_validator(arguments)
     return None
 
 

@@ -108,6 +108,10 @@ try:
 except ImportError:
     pass
 try:
+    import openjarvis.tools.outlook_governed_registration  # noqa: F401
+except ImportError:
+    pass
+try:
     import openjarvis.tools.user_profile_manage  # noqa: F401
 except ImportError:
     pass

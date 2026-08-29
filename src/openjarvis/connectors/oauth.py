@@ -118,6 +118,33 @@ OAUTH_PROVIDERS: Dict[str, OAuthProvider] = {
         connector_ids=("spotify",),
         credential_files=("spotify.json",),
     ),
+    # FASE 4P.4: least-privilege by design -- Mail.Send only (never
+    # Mail.Read/Mail.ReadWrite; MAIA never reads or drafts a real message
+    # via Graph, it only sends one after local, governed approval). The
+    # account-identity guard (governed_actions/outlook_capability.py)
+    # reads the ID token's own `preferred_username`/`email` claim locally
+    # -- deliberately NOT an additional `User.Read` Graph permission --
+    # since openid/email/profile are free OIDC scopes, not Graph grants.
+    # `common` (not a specific tenant id) is Microsoft's standard
+    # multi-tenant + personal-account endpoint, matching Google's own
+    # "Desktop app" OAuth client pattern above; nothing in this codebase
+    # or environment specifies a specific tenant id (confirmed by audit).
+    "microsoft": OAuthProvider(
+        name="microsoft",
+        display_name="Microsoft 365 / Outlook",
+        auth_endpoint="https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+        token_endpoint="https://login.microsoftonline.com/common/oauth2/v2.0/token",
+        scopes=["openid", "email", "profile", "offline_access", "Mail.Send"],
+        setup_url="https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
+        setup_hint=(
+            "Azure Portal -> App registrations -> New registration (Desktop app, "
+            "redirect URI http://127.0.0.1:8790/callback) -> API permissions -> "
+            "Microsoft Graph -> Delegated -> Mail.Send, offline_access -> Grant consent"
+        ),
+        callback_port=8790,
+        connector_ids=("outlook_graph",),
+        credential_files=("outlook_graph.json",),
+    ),
 }
 
 
