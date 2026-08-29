@@ -198,6 +198,14 @@ interface AppState {
   setStreamState: (state: Partial<StreamState>) => void;
   resetStream: () => void;
 
+  // MAIA Neural Core (FASE 4O.4B): mirrors useVoiceLoop's local state so a
+  // presentation-only component elsewhere in the tree can read it without
+  // owning a second voice loop instance -- useVoiceLoop remains the sole
+  // owner of the mic/VAD lifecycle, this is a read-only broadcast of its
+  // existing state, not new voice logic.
+  voiceLoopState: 'idle' | 'listening' | 'thinking' | 'speaking';
+  setVoiceLoopState: (state: 'idle' | 'listening' | 'thinking' | 'speaking') => void;
+
   // Deep Research toggle
   deepResearch: boolean;
   setDeepResearch: (on: boolean) => void;
@@ -274,6 +282,7 @@ export const useAppStore = create<AppState>((set, get) => {
         ? initial.conversations[initial.activeId].messages
         : [],
     streamState: INITIAL_STREAM,
+    voiceLoopState: 'idle',
 
     models: [],
     modelsLoading: true,
@@ -468,6 +477,10 @@ export const useAppStore = create<AppState>((set, get) => {
 
     resetStream: () => {
       set({ streamState: INITIAL_STREAM });
+    },
+
+    setVoiceLoopState: (voiceLoopState) => {
+      set({ voiceLoopState });
     },
 
     // ── Deep Research ─────────────────────────────────────────────

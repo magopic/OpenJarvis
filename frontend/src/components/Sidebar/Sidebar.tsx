@@ -18,6 +18,7 @@ import {
   ScrollText,
   Database,
   Network,
+  Brain,
 } from 'lucide-react';
 import { ConversationList } from './ConversationList';
 import { useAppStore } from '../../lib/store';
@@ -54,6 +55,11 @@ export function Sidebar() {
   };
 
   const navItems = [
+    // FASE 4O.4B: MAIA is positioned first as the conceptual future
+    // primary entry point (per phase instructions), without changing
+    // what the default "/" route actually loads -- see MaiaPage.tsx's
+    // header comment / the phase report's STEP 8 analysis.
+    { path: '/maia', icon: Brain, label: 'MAIA' },
     { path: '/', icon: MessageSquare, label: 'Chat' },
     { path: '/dashboard', icon: BarChart3, label: 'Dashboard' },
     { path: '/data-sources', icon: Database, label: 'Data Sources' },

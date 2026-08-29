@@ -9,6 +9,7 @@ import { AgentsPage } from './pages/AgentsPage';
 import { DataSourcesPage } from './pages/DataSourcesPage';
 import { LogsPage } from './pages/LogsPage';
 import { KnowledgeGraphPage } from './pages/KnowledgeGraphPage';
+import { MaiaPage } from './pages/MaiaPage';
 import { CommandPalette } from './components/CommandPalette';
 import { SetupScreen } from './components/SetupScreen';
 import { Toaster } from './components/ui/sonner';
@@ -190,6 +191,7 @@ export default function App() {
           <Route path="get-started" element={<GetStartedPage />} />
           <Route path="data-sources" element={<DataSourcesPage />} />
           <Route path="knowledge-graph" element={<KnowledgeGraphPage />} />
+          <Route path="maia" element={<MaiaPage />} />
           <Route path="agents" element={<AgentsPage />} />
           <Route path="logs" element={<LogsPage />} />
         </Route>

@@ -40,6 +40,10 @@ export function useVoiceLoop(model: string) {
   const setBoth = useCallback((s: VoiceLoopState) => {
     stateRef.current = s;
     setState(s);
+    // Broadcast to the shared store so other components (e.g. the MAIA
+    // Neural Core) can read the real voice state without owning a second
+    // mic/VAD instance -- this hook remains the sole source of truth.
+    useAppStore.getState().setVoiceLoopState(s);
   }, []);
 
   const stopPlayback = useCallback(() => {
