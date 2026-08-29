@@ -55,6 +55,20 @@ _ROUTING_BASE_TOP_N = 5
 _ROUTING_EXPANSION_STEP = 2
 _ROUTING_MAX_EXPANSIONS = 2
 
+# M3.2C: how many recently-successful tools stay offerable across turns of
+# the same conversation. The router scores the CURRENT utterance only, which
+# is sound for an opening question and wrong for a follow-up: "E rispetto
+# all'anno precedente?" tokenizes to {rispetto, anno, precedente}, matches no
+# OPS tool, and so withdrew the very tool the conversation was about -- the
+# model then called it from memory, without a schema, and guessed the
+# arguments (M3.2B). Remembering what actually worked restores continuity
+# without loosening the narrowing the router exists to provide.
+#
+# Kept deliberately small: a conversation realistically touches one to three
+# business domains, and this only ever re-offers tools already in the
+# authorized set, so it cannot grow toward the full catalog.
+_STICKY_TOOL_LIMIT = 8
+
 # FASE 4O.6A: bounded evidence-coverage check. Second Brain and Document
 # Knowledge tools are always-on (tool_router.py never scores/caps them the
 # way it does ops_dynamic_*), so -- unlike OPS -- nothing previously
@@ -222,6 +236,12 @@ class OrchestratorAgent(ToolUsingAgent):
         self._mode = mode
         self._system_prompt = system_prompt
         self._parallel_tools = parallel_tools
+        # M3.2C: per-conversation memory of tools that actually worked,
+        # recent-first. Instance state, not module state: the chat CLI builds
+        # one agent per session, so this is scoped to a conversation and is
+        # never shared across sessions or users. Reset in run() when a new
+        # conversation starts (see _reset_conversation_state_if_new).
+        self._recent_successful_tools: list[str] = []
 
     def run(
         self,
@@ -230,9 +250,97 @@ class OrchestratorAgent(ToolUsingAgent):
         **kwargs: Any,
     ) -> AgentResult:
         self._reset_loop_guard_for_new_turn()
+        self._reset_conversation_state_if_new(context)
         if self._mode == "structured":
-            return self._run_structured(input, context, **kwargs)
-        return self._run_function_calling(input, context, **kwargs)
+            result = self._run_structured(input, context, **kwargs)
+        else:
+            result = self._run_function_calling(input, context, **kwargs)
+        # M3.2C: recorded here, from the mode-independent AgentResult, so both
+        # modes behave identically and the two tool-execution branches inside
+        # _run_function_calling need no duplicated bookkeeping.
+        self._remember_successful_tools(getattr(result, "tool_results", None) or [])
+        return result
+
+    # ------------------------------------------------------------------
+    # M3.2C — conversational tool availability
+    # ------------------------------------------------------------------
+
+    def _reset_conversation_state_if_new(self, context: Optional[AgentContext]) -> None:
+        """Drop remembered tools when a fresh conversation begins.
+
+        "Fresh" means the caller handed us no prior exchange: either no
+        context at all, or a conversation carrying no user/assistant turns.
+        That is exactly what the chat CLI produces on its first turn and
+        after ``/clear``, so isolation between conversations needs no
+        cooperation from the caller.
+        """
+        prior: list = []
+        if context is not None:
+            conversation = getattr(context, "conversation", None)
+            prior = [
+                m
+                for m in (getattr(conversation, "messages", None) or [])
+                if getattr(m, "role", None) != Role.SYSTEM
+            ]
+        if not prior:
+            self._recent_successful_tools = []
+
+    def _remember_successful_tools(self, tool_results: list) -> None:
+        """Record tools that ran successfully, recent-first and bounded.
+
+        Three conditions must all hold, and together they are what keeps this
+        from ever widening what the model may reach:
+
+          1. the tool was actually invoked -- it is in this turn's results;
+          2. its execution succeeded -- ToolResult.success is True. This is
+             the generic tool-execution signal, deliberately not any
+             OPS-specific notion: the OPS Bridge adapter already maps a
+             non-ok envelope to success=False, so a `forbidden` or
+             `invalid_request` answer is not remembered as a working tool;
+          3. it is still a member of self._tools, the set authorized for
+             this session.
+
+        Condition 3 is the whole security argument, and it is why no special
+        case is needed for the capabilities this phase forbids: an
+        owner_only capability and the internal-only registry tool are both
+        absent from self._tools by construction (M3.1A governance, and the
+        router's fallback resolving from ToolRegistry rather than from the
+        authorized list), so neither can be recorded, and a tool whose
+        authorization is later withdrawn stops being offered immediately.
+        """
+        authorized = {t.spec.name for t in self._tools}
+        for result in tool_results:
+            name = getattr(result, "tool_name", None)
+            if not name or name not in authorized:
+                continue
+            if getattr(result, "success", False) is not True:
+                continue
+            if name in self._recent_successful_tools:
+                self._recent_successful_tools.remove(name)
+            self._recent_successful_tools.insert(0, name)
+        del self._recent_successful_tools[_STICKY_TOOL_LIMIT:]
+
+    def _with_sticky_tools(self, routed: list) -> list:
+        """Union the routed set with remembered tools, preserving order.
+
+        The router keeps doing semantic narrowing untouched; this only adds
+        back tools this conversation has already used successfully and that
+        are still authorized. Deduplicated, so a tool the router selected on
+        its own is not offered twice.
+        """
+        if not self._recent_successful_tools:
+            return routed
+        selected = list(routed)
+        present = {t.spec.name for t in selected}
+        by_name = {t.spec.name: t for t in self._tools}
+        for name in self._recent_successful_tools:
+            if name in present:
+                continue
+            tool = by_name.get(name)
+            if tool is not None:
+                selected.append(tool)
+                present.add(name)
+        return selected
 
     # ------------------------------------------------------------------
     # Structured mode (THOUGHT/TOOL/INPUT/FINAL_ANSWER)
@@ -497,6 +605,10 @@ class OrchestratorAgent(ToolUsingAgent):
             from openjarvis.agents.tool_router import select_relevant_tools
 
             routed_tools = select_relevant_tools(self._tools, input, top_n=top_n)
+            # M3.2C: the router narrows on this utterance alone; add back what
+            # this conversation has already used successfully, so an anaphoric
+            # follow-up does not lose the tool it is talking about.
+            routed_tools = self._with_sticky_tools(routed_tools)
             return [t.to_openai_function() for t in routed_tools]
 
         openai_tools = _route_tools(_ROUTING_BASE_TOP_N)
