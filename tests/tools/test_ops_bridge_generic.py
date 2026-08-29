@@ -26,8 +26,21 @@ from openjarvis.tools.ops_bridge_generic import (
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("OPS_BRIDGE_SERVICE_TOKEN", raising=False)
-    monkeypatch.delenv("OPS_BRIDGE_SERVICE_ID", raising=False)
+    # OPS_BRIDGE_BASE_URL and the two timeout budgets are cleared alongside
+    # the credentials so this file stays hermetic. Every mock below is bound
+    # to the default http://127.0.0.1:3000; on a machine where an operator
+    # has configured a real Bridge, the client would resolve that host
+    # instead and every mock would miss. respx blocks the call rather than
+    # letting it reach the network, but the tests would still fail for a
+    # reason that has nothing to do with what they assert.
+    for name in (
+        "OPS_BRIDGE_SERVICE_TOKEN",
+        "OPS_BRIDGE_SERVICE_ID",
+        "OPS_BRIDGE_BASE_URL",
+        "OPS_BRIDGE_DISCOVERY_TIMEOUT_SECONDS",
+        "OPS_BRIDGE_CALL_TIMEOUT_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 class TestAuthHeadersHelper:

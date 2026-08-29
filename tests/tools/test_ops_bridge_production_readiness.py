@@ -51,9 +51,13 @@ _SECRET = "SECRET_TOKEN_MUST_NOT_APPEAR_IN_LOGS_9f3a1c"
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # OPS_BRIDGE_BASE_URL is cleared too: every mock here is bound to the
+    # default http://127.0.0.1:3000, so on a machine with a real Bridge
+    # configured the client would resolve that host and miss all of them.
     for name in (
         "OPS_BRIDGE_SERVICE_TOKEN",
         "OPS_BRIDGE_SERVICE_ID",
+        "OPS_BRIDGE_BASE_URL",
         "OPS_BRIDGE_DISCOVERY_TIMEOUT_SECONDS",
         "OPS_BRIDGE_CALL_TIMEOUT_SECONDS",
     ):

@@ -140,6 +140,20 @@ _AUTO_ENABLE_CATEGORIES = {"READ", "KNOWLEDGE"}
 # though they pass governance and stay registered in ToolRegistry.
 _INTERNAL_ONLY_CAPABILITIES = {_LIST_CAPABILITY}
 
+# M3.1A — authorization-aware chat auto-enable. The Bridge's own
+# authorization policy (OPS ONE: `authorization?: 'none' | 'owner_only'`, an
+# optional field, so it is simply absent on every capability that does not
+# restrict itself) says which *principal* a capability needs. This runtime
+# calls the Bridge as a trusted_service, and OPS ONE deliberately refuses
+# owner_only to a service identity -- proving you are a legitimate caller is
+# not proving you act for the owner. Offering the model a tool that provably
+# cannot succeed only buys a wasted turn and a `forbidden` envelope.
+#
+# Only a recognized, explicitly-unrestricted policy opens the chat surface;
+# anything unrecognized is withheld, so a policy OPS ONE adds later does not
+# silently become chat-facing here before this side knows what it means.
+_CHAT_UNRESTRICTED_AUTHORIZATION = "none"
+
 # Populated by discover_and_register_ops_bridge_tools(); read by the two
 # existing config.tools.enabled consumers (SystemBuilder._resolve_tools and
 # serve.py's _resolve_allowed_tools) so a TRUSTED/READ|KNOWLEDGE capability
@@ -160,6 +174,36 @@ def _passes_governance(capability: Dict[str, Any]) -> bool:
     if category not in _AUTO_ENABLE_CATEGORIES:
         return False
     return True
+
+
+def _is_chat_authorized(capability: Dict[str, Any]) -> bool:
+    """Whether this capability is usable by the principal the runtime is.
+
+    Deliberately a *separate* question from _passes_governance(), and applied
+    at a different point:
+
+      - _passes_governance() answers "may this capability exist here at all?"
+        A failure there means the capability is not registered, full stop.
+
+      - this answers "can the current principal actually use it?" A failure
+        here withholds the tool from chat while leaving it registered, so the
+        local registry keeps describing what the Bridge really exposes and a
+        future runtime that forwards a real owner session needs no
+        rediscovery or code change to pick it up.
+
+    Fail-closed: absent or null means the capability declares no restriction
+    (the shape 7 of the 8 production capabilities have today) and is
+    unchanged from before M3.1A; an explicit 'none' means the same thing
+    said out loud; anything else -- a policy this side does not recognize, a
+    non-string, a case or whitespace variant -- is withheld rather than
+    guessed at.
+    """
+    authorization = capability.get("authorization")
+    if authorization is None:
+        return True
+    if not isinstance(authorization, str):
+        return False
+    return authorization == _CHAT_UNRESTRICTED_AUTHORIZATION
 
 
 def _bridge_base_url() -> str:
@@ -443,6 +487,7 @@ def discover_and_register_ops_bridge_tools() -> List[str]:
 
     registered: List[str] = []
     auto_enabled: List[str] = []
+    withheld: List[tuple] = []
     for capability in capabilities:
         if not isinstance(capability, dict):
             continue
@@ -457,8 +502,30 @@ def discover_and_register_ops_bridge_tools() -> List[str]:
             except Exception:
                 continue
         registered.append(tool_id)
-        if name not in _INTERNAL_ONLY_CAPABILITIES:
-            auto_enabled.append(tool_id)
+        # Registration above is unconditional for anything that passed
+        # governance -- the local registry describes what the Bridge exposes.
+        # Auto-enable below is narrower: it describes what MAIA can actually
+        # use as the principal this runtime currently is (M3.1A).
+        if name in _INTERNAL_ONLY_CAPABILITIES:
+            continue
+        if not _is_chat_authorized(capability):
+            withheld.append((tool_id, capability.get("authorization")))
+            continue
+        auto_enabled.append(tool_id)
+
+    if withheld:
+        # Expected, not a failure -- but a tool silently missing from chat is
+        # exactly the class of invisible behavior M3.0 set out to end, so say
+        # it once at INFO. Only the tool id and the policy name are logged;
+        # neither is a credential.
+        logger.info(
+            "OPS Bridge: %d capability(ies) registered but withheld from chat "
+            "for this principal: %s. The Bridge enforces this server-side; "
+            "they are kept in the local registry for future runtimes that can "
+            "satisfy the policy.",
+            len(withheld),
+            ", ".join(f"{tool_id} (authorization={policy!r})" for tool_id, policy in withheld),
+        )
 
     _auto_enabled_tool_ids = auto_enabled
     return registered
