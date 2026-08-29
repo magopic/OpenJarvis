@@ -11,7 +11,6 @@ the OPS Bridge / OPS ONE side, and vice versa.
 
 from __future__ import annotations
 
-import os
 from typing import Any, Dict
 
 import httpx
@@ -19,15 +18,20 @@ import httpx
 from openjarvis.core.registry import ToolRegistry
 from openjarvis.core.types import ToolResult
 from openjarvis.tools._stubs import BaseTool, ToolSpec
-from openjarvis.tools.ops_bridge_generic import _auth_headers
 
-_DEFAULT_BASE_URL = "http://127.0.0.1:3000"
+# M3.0: the base-URL resolver and the call-timeout budget are imported from
+# the generic adapter rather than restated here, exactly as _auth_headers
+# already was (M1.1). This file previously kept its own _DEFAULT_BASE_URL,
+# its own _bridge_base_url() and a hardcoded 30.0s timeout -- three copies
+# of environment logic that could, and did, drift out of step with the
+# adapter both call sites share. There is now one definition of each.
+from openjarvis.tools.ops_bridge_generic import (
+    _auth_headers,
+    _bridge_base_url,
+    _call_timeout_seconds,
+)
+
 _CAPABILITY = "ops.production.get_kpi"
-_TIMEOUT_SECONDS = 30.0
-
-
-def _bridge_base_url() -> str:
-    return os.environ.get("OPS_BRIDGE_BASE_URL", _DEFAULT_BASE_URL).rstrip("/")
 
 
 def _summarize(envelope: Dict[str, Any]) -> str:
@@ -139,14 +143,14 @@ class OpsBridgeProductionKpiTool(BaseTool):
                 url,
                 json={"capability": _CAPABILITY, "params": bridge_params},
                 headers=_auth_headers(),
-                timeout=_TIMEOUT_SECONDS,
+                timeout=_call_timeout_seconds(),
             )
             response.raise_for_status()
             envelope = response.json()
         except httpx.TimeoutException as exc:
             return ToolResult(
                 tool_name=self.tool_id,
-                content=f"OPS Bridge request timed out after {_TIMEOUT_SECONDS}s: {exc}",
+                content=f"OPS Bridge request timed out after {_call_timeout_seconds()}s: {exc}",
                 success=False,
             )
         except httpx.HTTPStatusError as exc:

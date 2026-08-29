@@ -1090,6 +1090,44 @@ OpenJarvis respects the following environment variables:
 | `MINIMAX_API_KEY` | API key for MiniMax cloud inference. Required for the `cloud` engine with MiniMax models (MiniMax-M2.7, MiniMax-M2.7-highspeed, MiniMax-M2.5, MiniMax-M2.5-highspeed). |
 | `TAVILY_API_KEY` | API key for the Tavily web search tool. Required for the `web_search` tool. |
 
+### OPS Bridge
+
+Optional. These are read only by the OPS Bridge adapter
+(`openjarvis/tools/ops_bridge_generic.py`), which discovers business
+capabilities from a connected OPS ONE deployment and registers one tool per
+capability. **If you do not have an OPS Bridge, leave all of these unset** —
+discovery fails closed, no tool is registered, and OpenJarvis starts exactly
+as it otherwise would.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPS_BRIDGE_BASE_URL` | `http://127.0.0.1:3000` | Base URL of the OPS Bridge host. The default targets a local development instance; **a production deployment must set this explicitly** to the remote origin (the adapter appends `/api/ops-bridge` itself). |
+| `OPS_BRIDGE_SERVICE_TOKEN` | *(unset)* | Service-to-service credential, sent as the `x-ops-service-token` header. Must match `OPS_SERVICE_TOKEN` configured on the OPS ONE side — the Bridge rejects the caller otherwise. **Provide it as a deployment secret; never commit it.** When unset, no credential header is sent at all. |
+| `OPS_BRIDGE_SERVICE_ID` | `openjarvis-maia` | Caller identity sent as the `x-ops-service-id` header. Not a secret; used for attribution in OPS ONE's logs. |
+| `OPS_BRIDGE_DISCOVERY_TIMEOUT_SECONDS` | `10.0` | Budget for the one capability-discovery call, made at import time. Kept deliberately short so a missing or unreachable Bridge cannot stall startup. Raise it (e.g. `45`) when the Bridge is on a host that cold-starts slowly, such as a free-tier PaaS. |
+| `OPS_BRIDGE_CALL_TIMEOUT_SECONDS` | `60.0` | Budget for each capability call once tools are registered. The default clears a slow remote cold start with margin. |
+
+Both timeouts accept a positive number of seconds. A blank, non-numeric,
+zero, negative or non-finite value is ignored in favour of the default
+rather than raising — a typo in a deployment's environment must not break
+`import openjarvis.tools`.
+
+If discovery fails, the reason is reported once at `WARNING` with a stable
+`reason=` marker (`network_error`, `timeout`, `http_error`, `invalid_json`,
+`malformed_envelope`, `envelope_not_ok`). Note that an OPS Bridge rejecting
+an uncredentialed caller answers **HTTP 200** with `{"status": "forbidden"}`,
+which surfaces as `reason=envelope_not_ok status=forbidden` — that is the
+signature of a missing or mismatched `OPS_BRIDGE_SERVICE_TOKEN`, not of an
+unreachable host. The credential itself is never logged.
+
+!!! note "Connecting to a real OPS ONE deployment"
+
+    Wiring these values against a live OPS ONE production instance —
+    including provisioning the shared service credential on both sides — is
+    a separate, deliberate step (milestone M3.1). The variables above are
+    the interface for it; nothing here configures a real deployment on its
+    own.
+
 ## Next Steps
 
 - [Quick Start](quickstart.md) — Run your first query

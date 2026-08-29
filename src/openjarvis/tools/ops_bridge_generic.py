@@ -22,6 +22,8 @@ Registry reports instead of one hardcoded capability.
 from __future__ import annotations
 
 import json
+import logging
+import math
 import os
 from typing import Any, Dict, List, Type
 
@@ -31,11 +33,61 @@ from openjarvis.core.registry import ToolRegistry
 from openjarvis.core.types import ToolResult
 from openjarvis.tools._stubs import BaseTool, ToolSpec
 
+logger = logging.getLogger(__name__)
+
 _DEFAULT_BASE_URL = "http://127.0.0.1:3000"
 _LIST_CAPABILITY = "ops.registry.list_capabilities"
-_DISCOVERY_TIMEOUT_SECONDS = 2.0
-_CALL_TIMEOUT_SECONDS = 30.0
 _TOOL_ID_PREFIX = "ops_dynamic_"
+
+# M3.0 — OPS Bridge Production Readiness. Both budgets were tuned for a
+# same-machine http://127.0.0.1:3000 Bridge and are wrong for a remote one:
+#
+#   - the call budget was 30.0s, *below* a measured Render Free cold start
+#     (~33s), so the first call after an idle period timed out against a
+#     Bridge that was in fact answering. 60.0 clears it with margin, and
+#     costs nothing to installs without an OPS Bridge -- no capability is
+#     registered for them, so no call is ever made.
+#
+#   - the discovery budget was 2.0s, uncomfortably close to a warm remote
+#     HTTPS round trip (1.1-1.7s measured). It is raised, but deliberately
+#     NOT past a cold start: discovery runs at import time (see
+#     tools/__init__.py) and a larger default would stall startup for every
+#     OpenJarvis install, the overwhelming majority of which have no OPS
+#     Bridge at all. A deployment that must survive a cold start on the
+#     first attempt raises OPS_BRIDGE_DISCOVERY_TIMEOUT_SECONDS itself; a
+#     discovery that does time out is now reported instead of silent.
+_DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 10.0
+_DEFAULT_CALL_TIMEOUT_SECONDS = 60.0
+_DISCOVERY_TIMEOUT_ENV = "OPS_BRIDGE_DISCOVERY_TIMEOUT_SECONDS"
+_CALL_TIMEOUT_ENV = "OPS_BRIDGE_CALL_TIMEOUT_SECONDS"
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a positive, finite float from the environment, or fall back.
+
+    Never raises: unset, blank, non-numeric, non-finite (nan/inf) or
+    non-positive values all yield *default*. This sits on the import-time
+    discovery path, so a typo in a deployment's environment must degrade to
+    the default rather than break ``import openjarvis.tools`` outright.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw.strip())
+    except (TypeError, ValueError, AttributeError):
+        return default
+    if not math.isfinite(value) or value <= 0:
+        return default
+    return value
+
+
+def _discovery_timeout_seconds() -> float:
+    return _env_float(_DISCOVERY_TIMEOUT_ENV, _DEFAULT_DISCOVERY_TIMEOUT_SECONDS)
+
+
+def _call_timeout_seconds() -> float:
+    return _env_float(_CALL_TIMEOUT_ENV, _DEFAULT_CALL_TIMEOUT_SECONDS)
 
 # M1.1 — OPS Bridge Authentication Boundary. Every OPS Bridge caller was
 # previously anonymous (no headers sent at all); OPS ONE's own
@@ -220,7 +272,7 @@ def _call_bridge(capability: str, params: Dict[str, Any]) -> Dict[str, Any]:
         url,
         json={"capability": capability, "params": params},
         headers=_auth_headers(),
-        timeout=_CALL_TIMEOUT_SECONDS,
+        timeout=_call_timeout_seconds(),
     )
     response.raise_for_status()
     return response.json()
@@ -292,6 +344,32 @@ def _make_dynamic_tool_class(capability: Dict[str, Any]) -> Type[BaseTool]:
     return _DynamicOpsBridgeTool
 
 
+def _abandon_discovery(reason: str, detail: str) -> List[str]:
+    """Fail closed on a discovery problem, and say why exactly once.
+
+    Every caller of this helper registers nothing and returns [] -- the
+    boundary is identical to the pre-M3.0 behavior. The only thing added is
+    a single WARNING carrying a stable ``reason=<code>`` marker plus
+    non-sensitive detail.
+
+    Deliberately never receives (and so can never log) the request headers,
+    the service token, or any Authorization value: callers pass an exception
+    *type name*, an HTTP status code, or the Bridge's own server-authored
+    `reason` string -- never the credential that was sent.
+    """
+    global _auto_enabled_tool_ids
+    _auto_enabled_tool_ids = []
+    logger.warning(
+        "OPS Bridge capability discovery failed (reason=%s): %s. "
+        "No OPS capabilities registered; MAIA will have no business tools "
+        "this run. Bridge base URL: %s",
+        reason,
+        detail,
+        _bridge_base_url(),
+    )
+    return []
+
+
 def discover_and_register_ops_bridge_tools() -> List[str]:
     """Discover governance-passing capabilities and register a tool for each.
 
@@ -304,6 +382,15 @@ def discover_and_register_ops_bridge_tools() -> List[str]:
     in an empty list, matching the try/except-and-skip convention every other
     optional tool in tools/__init__.py already follows.
 
+    M3.0: that empty list is unchanged, but it is no longer *silent*. Every
+    distinct failure is reported once at WARNING with a stable
+    ``reason=<code>`` marker, because in production the failures are not
+    self-evident: OPS ONE answers an unauthenticated Bridge call with
+    HTTP 200 and ``{"status": "forbidden"}``, so `raise_for_status()` passes
+    and the result was previously indistinguishable from "no Bridge
+    configured". Reporting the reason does not weaken the boundary -- fail
+    closed is enforced identically on every branch below.
+
     Also refreshes the module's auto-enable list (see
     get_auto_enabled_ops_tool_ids) to exactly the tool_ids registered by this
     run that are meant to reach chat -- i.e. governance-passing capabilities
@@ -313,17 +400,46 @@ def discover_and_register_ops_bridge_tools() -> List[str]:
 
     try:
         envelope = _call_bridge_for_discovery()
-    except Exception:
-        _auto_enabled_tool_ids = []
-        return []
+    except httpx.TimeoutException as exc:
+        return _abandon_discovery(
+            "timeout",
+            f"no response within {_discovery_timeout_seconds()}s ({type(exc).__name__})",
+        )
+    except httpx.HTTPStatusError as exc:
+        return _abandon_discovery(
+            "http_error", f"status_code={exc.response.status_code}"
+        )
+    except httpx.RequestError as exc:
+        return _abandon_discovery("network_error", f"{type(exc).__name__}")
+    except ValueError:
+        # response.json() on a non-JSON body (HTML error page, proxy
+        # interstitial, empty response).
+        return _abandon_discovery("invalid_json", "response body was not valid JSON")
+    except Exception as exc:  # never let discovery break `import openjarvis.tools`
+        return _abandon_discovery("unexpected_error", f"{type(exc).__name__}")
 
-    if envelope.get("status") != "ok":
-        _auto_enabled_tool_ids = []
-        return []
-    capabilities = ((envelope.get("data") or {}).get("capabilities")) or []
+    if not isinstance(envelope, dict):
+        return _abandon_discovery(
+            "malformed_envelope", f"expected a JSON object, got {type(envelope).__name__}"
+        )
+
+    status = envelope.get("status")
+    if status != "ok":
+        # Includes the production case this phase exists for: HTTP 200 with
+        # status "forbidden" when no service credential is configured. The
+        # Bridge's own `reason` is relayed verbatim -- it is server-authored
+        # explanatory text, never a credential.
+        return _abandon_discovery(
+            "envelope_not_ok", f"status={status} bridge_reason={envelope.get('reason')}"
+        )
+
+    data = envelope.get("data")
+    capabilities = data.get("capabilities") if isinstance(data, dict) else None
     if not isinstance(capabilities, list):
-        _auto_enabled_tool_ids = []
-        return []
+        return _abandon_discovery(
+            "malformed_envelope",
+            "envelope status was 'ok' but data.capabilities is missing or not a list",
+        )
 
     registered: List[str] = []
     auto_enabled: List[str] = []
@@ -367,7 +483,7 @@ def _call_bridge_for_discovery() -> Dict[str, Any]:
         url,
         json={"capability": _LIST_CAPABILITY, "params": {}},
         headers=_auth_headers(),
-        timeout=_DISCOVERY_TIMEOUT_SECONDS,
+        timeout=_discovery_timeout_seconds(),
     )
     response.raise_for_status()
     return response.json()
