@@ -31,24 +31,38 @@ const edge = (overrides: Partial<GraphEdge> = {}): GraphEdge => ({
 });
 
 describe('styleForNode', () => {
-  it('gives DOMAIN, ENTITY, and ENTRY visibly distinct shapes (STEP 5)', () => {
+  // FASE 4O.4A: every node is a sphere now (user visual review: distinct
+  // 3D primitives per kind read as "unrelated shapes") -- differentiation
+  // moved to color/size/halo, so these assertions check *that* instead.
+  it('gives DOMAIN, ENTITY, and ENTRY visibly distinct colors and sizes (STEP 5)', () => {
     const domain = styleForNode({ ...entry({ kind: 'DOMAIN', entry_type: null }) });
     const ent = styleForNode({ ...entry({ kind: 'ENTITY', entry_type: null }) });
     const problem = styleForNode(entry({ entry_type: 'PROBLEM' }));
-    const shapes = new Set([domain.shape, ent.shape, problem.shape]);
-    expect(shapes.size).toBe(3);
+    const colors = new Set([domain.coreColor, ent.coreColor, problem.coreColor]);
+    expect(colors.size).toBe(3);
+    expect(domain.size).toBeGreaterThan(ent.size);
+    expect(domain.size).toBeGreaterThan(problem.size);
   });
 
-  it('gives each Experience Cycle entry type its own shape', () => {
+  it('gives each Experience Cycle entry type its own color', () => {
     const types = ['PROBLEM', 'HYPOTHESIS', 'DECISION', 'ACTION', 'OUTCOME', 'LESSON'] as const;
-    const shapes = types.map((t) => styleForNode(entry({ entry_type: t })).shape);
-    expect(new Set(shapes).size).toBe(new Set(types).size);
+    const colors = types.map((t) => styleForNode(entry({ entry_type: t })).coreColor);
+    expect(new Set(colors).size).toBe(new Set(types).size);
   });
 
   it('falls back to a defined neutral style for an unmapped/missing entry_type', () => {
     const style = styleForNode(entry({ entry_type: null }));
-    expect(style.shape).toBeDefined();
-    expect(style.colorVar).toBeDefined();
+    expect(style.coreColor).toBeDefined();
+    expect(style.size).toBeGreaterThan(0);
+  });
+
+  it('keeps the palette restrained: every ENTRY style stays within the defined color set (STEP 6)', () => {
+    const types = ['PROBLEM', 'HYPOTHESIS', 'DECISION', 'ACTION', 'OUTCOME', 'LESSON', 'EVENT', 'OBSERVATION', 'PROCEDURE', 'MEETING_NOTE'] as const;
+    const colors = new Set(types.map((t) => styleForNode(entry({ entry_type: t })).coreColor));
+    // Restrained means a handful of curated hues, not one per type times
+    // arbitrary variation -- 10 entry types collapse to far fewer colors
+    // since several share the same neutral treatment.
+    expect(colors.size).toBeLessThanOrEqual(7);
   });
 });
 
@@ -79,14 +93,14 @@ describe('styleForEdge', () => {
   it('visually distinguishes derived NAVIGATION edges from stored RELATIONSHIP edges (STEP 18-H)', () => {
     const nav = styleForEdge(edge({ kind: 'NAVIGATION', status: null, basis: 'SHARED_DOMAIN' }));
     const rel = styleForEdge(edge({ kind: 'RELATIONSHIP', status: 'CONFIRMED' }));
-    expect(nav.colorVar).not.toBe(rel.colorVar);
+    expect(nav.color).not.toBe(rel.color);
     expect(nav.opacity).toBeLessThan(rel.opacity);
   });
 
   it('gives SUPERSESSION its own distinct treatment', () => {
     const supersession = styleForEdge(edge({ kind: 'SUPERSESSION', status: 'CONFIRMED', basis: 'SUPERSEDES' }));
     const rel = styleForEdge(edge({ kind: 'RELATIONSHIP', status: 'CONFIRMED' }));
-    expect(supersession.colorVar).not.toBe(rel.colorVar);
+    expect(supersession.color).not.toBe(rel.color);
   });
 
   it('de-emphasizes REJECTED far below CONFIRMED if one ever appears', () => {

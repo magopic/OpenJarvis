@@ -1,6 +1,10 @@
 import { Loader2, Network, Lock, AlertTriangle } from 'lucide-react';
 import { Button } from '../ui/button';
 
+// FASE 4O.4A: hardcoded to the MAIA graph palette rather than the
+// app's `--color-*` variables -- these states render inside the
+// always-dark graph workspace (`graphTheme.ts`), which is independent
+// of the surrounding app's light/dark theme setting.
 const wrapStyle: React.CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
@@ -9,8 +13,8 @@ const wrapStyle: React.CSSProperties = {
   gap: 12,
   height: '100%',
   width: '100%',
-  color: 'var(--color-text-secondary)',
-  fontFamily: 'var(--font-hud)',
+  color: '#8fb4c7',
+  fontFamily: "'IBM Plex Mono', 'SF Mono', ui-monospace, monospace",
   textAlign: 'center',
   padding: 24,
 };
@@ -18,7 +22,7 @@ const wrapStyle: React.CSSProperties = {
 export function GraphLoadingState() {
   return (
     <div style={wrapStyle}>
-      <Loader2 size={28} className="animate-spin" style={{ color: 'var(--color-accent)' }} />
+      <Loader2 size={26} className="animate-spin" style={{ color: '#22d3ee' }} />
       <span className="text-sm">Loading the knowledge graph…</span>
     </div>
   );
@@ -27,12 +31,12 @@ export function GraphLoadingState() {
 export function GraphEmptyState({ onRetry }: { onRetry?: () => void }) {
   return (
     <div style={wrapStyle}>
-      <Network size={30} style={{ color: 'var(--color-text-tertiary)' }} />
+      <Network size={28} style={{ color: '#4a6172', opacity: 0.7 }} />
       <div>
-        <p className="text-sm" style={{ color: 'var(--color-text)' }}>
+        <p className="text-sm" style={{ color: '#dfeef7' }}>
           Nothing to show yet.
         </p>
-        <p className="text-xs mt-1" style={{ color: 'var(--color-text-tertiary)', maxWidth: 320 }}>
+        <p className="text-xs mt-1" style={{ color: '#5c7c8f', maxWidth: 320 }}>
           No active memories match the current filters. Try including archived or superseded
           entries, or broaden the domain filter.
         </p>
@@ -49,12 +53,12 @@ export function GraphEmptyState({ onRetry }: { onRetry?: () => void }) {
 export function GraphNoAccessState() {
   return (
     <div style={wrapStyle}>
-      <Lock size={28} style={{ color: 'var(--color-text-tertiary)' }} />
+      <Lock size={26} style={{ color: '#4a6172' }} />
       <div>
-        <p className="text-sm" style={{ color: 'var(--color-text)' }}>
+        <p className="text-sm" style={{ color: '#dfeef7' }}>
           Nothing available for your current identity.
         </p>
-        <p className="text-xs mt-1" style={{ color: 'var(--color-text-tertiary)', maxWidth: 320 }}>
+        <p className="text-xs mt-1" style={{ color: '#5c7c8f', maxWidth: 320 }}>
           This graph only ever shows memories you're authorized to see.
         </p>
       </div>
@@ -65,12 +69,12 @@ export function GraphNoAccessState() {
 export function GraphErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
     <div style={wrapStyle}>
-      <AlertTriangle size={28} style={{ color: 'var(--color-error)' }} />
+      <AlertTriangle size={26} style={{ color: '#e8917f' }} />
       <div>
-        <p className="text-sm" style={{ color: 'var(--color-text)' }}>
+        <p className="text-sm" style={{ color: '#dfeef7' }}>
           The knowledge graph couldn't be loaded.
         </p>
-        <p className="text-xs mt-1" style={{ color: 'var(--color-text-tertiary)', maxWidth: 320 }}>
+        <p className="text-xs mt-1" style={{ color: '#5c7c8f', maxWidth: 320 }}>
           {message}
         </p>
       </div>
