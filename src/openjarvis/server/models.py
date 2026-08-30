@@ -28,6 +28,15 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: int = 1024
     stream: bool = False
     tools: Optional[List[Dict[str, Any]]] = None
+    # M3.3A: optional, additive, ignored by every existing client. When
+    # present, this conversation's agent runtime state (M3.2C sticky tools)
+    # is kept isolated from every other conversation and restored on the
+    # next turn. Absent keeps the exact stateless OpenAI-compatible
+    # behaviour, except that each request now gets its own ephemeral
+    # runtime instead of sharing the process-wide agent's mutable state.
+    # History is not stored server-side either way: `messages` remains the
+    # single source of truth for what was said.
+    conversation_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

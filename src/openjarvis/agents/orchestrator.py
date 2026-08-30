@@ -273,7 +273,20 @@ class OrchestratorAgent(ToolUsingAgent):
         That is exactly what the chat CLI produces on its first turn and
         after ``/clear``, so isolation between conversations needs no
         cooperation from the caller.
+
+        M3.3A: that inference is the right default precisely because the CLI
+        has no conversation identifier to go on. A caller that DOES have one
+        (the HTTP boundary, which restores and persists this state per
+        conversation) owns the lifecycle explicitly, and must not have it
+        second-guessed: there, a follow-up turn can legitimately arrive with
+        an empty context, and re-deriving "fresh" from that would discard
+        the state the caller just restored. Such a caller sets
+        ``_conversation_state_is_external`` and takes responsibility for
+        resetting. Absent by default, so the CLI is unchanged.
         """
+        if getattr(self, "_conversation_state_is_external", False):
+            return
+
         prior: list = []
         if context is not None:
             conversation = getattr(context, "conversation", None)

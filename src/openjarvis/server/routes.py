@@ -12,6 +12,12 @@ from fastapi.responses import StreamingResponse
 
 from openjarvis.core.paths import get_config_dir
 from openjarvis.core.types import Message, Role, ToolCall
+from openjarvis.server.conversation_state import (
+    ConversationStateStore,
+    InvalidConversationId,
+    derive_conversation_agent,
+    validate_conversation_id,
+)
 from openjarvis.server.model_capabilities import is_embed_only_model
 from openjarvis.server.models import (
     ChatCompletionChunk,
@@ -117,12 +123,88 @@ def _ensure_identity_prompt(messages: list[Message], app_config) -> list[Message
     return [Message(role=Role.SYSTEM, content=prompt), *messages]
 
 
+def _conversation_state_store(app) -> ConversationStateStore:
+    """The app's conversation-state store, created on first use.
+
+    Kept on ``app.state`` rather than at module scope so two apps in one
+    process (tests, embedded use) never share conversation state.
+    """
+    store = getattr(app.state, "conversation_state_store", None)
+    if store is None:
+        store = ConversationStateStore()
+        app.state.conversation_state_store = store
+    return store
+
+
+def _server_api_key_configured(app) -> bool:
+    """Whether this server actually authenticates its API routes.
+
+    ``AuthMiddleware`` is a deliberate no-op when no key is set, which keeps
+    local development frictionless. The identified-conversation path refuses
+    to run in that mode instead of silently serving an open MAIA.
+    """
+    import os
+
+    if os.environ.get("OPENJARVIS_API_KEY"):
+        return True
+    config = getattr(app.state, "config", None)
+    return bool(getattr(getattr(config, "server", None), "api_key", "") or "")
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(request_body: ChatCompletionRequest, request: Request):
     """Handle chat completion requests (streaming and non-streaming)."""
     engine = request.app.state.engine
     agent = getattr(request.app.state, "agent", None)
     model = request_body.model
+
+    # M3.3A — per-conversation isolation of the agent's runtime state.
+    #
+    # `app.state.agent` is one instance shared by every request. Its
+    # configuration is safe to share; two fields are not (see
+    # server/conversation_state.py). Every request therefore runs on its own
+    # derived agent, so no request can write to the shared instance or read
+    # another's state -- with or without a conversation_id.
+    conversation_id = None
+    conversation_lock = None
+    store = _conversation_state_store(request.app)
+    if request_body.conversation_id is not None:
+        try:
+            conversation_id = validate_conversation_id(request_body.conversation_id)
+        except InvalidConversationId as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        # Fail closed on the identified path. An unauthenticated
+        # `/v1/chat/completions` is an accepted local-development
+        # convenience (AuthMiddleware is a no-op when no key is set), but a
+        # caller integrating a real front end must not be able to reach a
+        # wide-open MAIA by accident.
+        if not _server_api_key_configured(request.app):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "conversation_id requires an authenticated server: set "
+                    "OPENJARVIS_API_KEY (or server.api_key) before using it."
+                ),
+            )
+
+        # The caller must not be able to reshape what MAIA can reach. Tool
+        # governance is decided server-side (auto-enable policy, owner_only,
+        # internal-only); accepting a client tool list here would route the
+        # request to the raw engine path and bypass all of it.
+        if request_body.tools:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "'tools' cannot be combined with 'conversation_id': the "
+                    "server owns the tool surface for identified conversations."
+                ),
+            )
+
+        conversation_lock = store.lock_for(conversation_id)
+
+    if agent is not None:
+        agent = derive_conversation_agent(agent, conversation_id, store)
 
     # Inject memory context into messages before dispatching
     config = getattr(request.app.state, "config", None)
@@ -272,6 +354,15 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
                 memory_service=getattr(request.app.state, "memory_service", None),
                 config=config,
                 memory_backend=memory_backend,
+                # M3.3A: the agent runs inside the SSE generator, so the
+                # conversation's state can only be persisted once that has
+                # finished -- not when this coroutine returns.
+                on_turn_complete=(
+                    (lambda: store.save(conversation_id, agent))
+                    if conversation_id is not None
+                    else None
+                ),
+                turn_lock=conversation_lock,
             )
         return await _handle_stream(
             engine,
@@ -305,18 +396,41 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
     # worker thread so a slow/wedged non-streaming request can't stall the
     # event loop and every other concurrent request with it.
     if agent is not None and not request_body.tools:
-        response = await asyncio.to_thread(
-            _handle_agent,
-            agent,
-            model,
-            request_body,
-            complexity_info,
-            trace_store=getattr(request.app.state, "trace_store", None),
-            bus=getattr(request.app.state, "bus", None),
-            config=config,
-            memory_backend=memory_backend,
-            memory_service=memory_service,
-        )
+
+        def _run_agent_turn():
+            # M3.3A: take the conversation's own lock (never a global one, so
+            # different conversations still run in parallel) and persist this
+            # conversation's runtime state once the turn has completed. Both
+            # happen inside the worker thread, so the event loop is never
+            # blocked on a lock.
+            if conversation_lock is None:
+                return _handle_agent(
+                    agent,
+                    model,
+                    request_body,
+                    complexity_info,
+                    trace_store=getattr(request.app.state, "trace_store", None),
+                    bus=getattr(request.app.state, "bus", None),
+                    config=config,
+                    memory_backend=memory_backend,
+                    memory_service=memory_service,
+                )
+            with conversation_lock:
+                result = _handle_agent(
+                    agent,
+                    model,
+                    request_body,
+                    complexity_info,
+                    trace_store=getattr(request.app.state, "trace_store", None),
+                    bus=getattr(request.app.state, "bus", None),
+                    config=config,
+                    memory_backend=memory_backend,
+                    memory_service=memory_service,
+                )
+                store.save(conversation_id, agent)
+                return result
+
+        response = await asyncio.to_thread(_run_agent_turn)
     else:
         bus = getattr(request.app.state, "bus", None)
         response = await asyncio.to_thread(
@@ -670,6 +784,8 @@ async def _handle_agent_stream(
     memory_service=None,
     config=None,
     memory_backend=None,
+    on_turn_complete=None,
+    turn_lock=None,
 ):
     """Run the configured agent and return its result as an SSE response.
 
@@ -697,19 +813,30 @@ async def _handle_agent_stream(
         )
         yield f"data: {first_chunk.model_dump_json()}\n\n"
 
+        def _run_turn():
+            # M3.3A: hold the conversation's own lock across the agent run
+            # and persist its state on the way out, inside the worker
+            # thread. Both are no-ops for an unidentified conversation.
+            import contextlib
+
+            with (turn_lock or contextlib.nullcontext()):
+                result = _handle_agent(
+                    agent,
+                    model,
+                    req,
+                    complexity_info,
+                    trace_store=trace_store,
+                    bus=bus,
+                    config=config,
+                    memory_backend=memory_backend,
+                    memory_service=memory_service,
+                )
+                if on_turn_complete is not None:
+                    on_turn_complete()
+                return result
+
         try:
-            response = await asyncio.to_thread(
-                _handle_agent,
-                agent,
-                model,
-                req,
-                complexity_info,
-                trace_store=trace_store,
-                bus=bus,
-                config=config,
-                memory_backend=memory_backend,
-                memory_service=memory_service,
-            )
+            response = await asyncio.to_thread(_run_turn)
         except Exception as exc:
             logging.getLogger("openjarvis.server").error(
                 "Agent stream error: %s",
