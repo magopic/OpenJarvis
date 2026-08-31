@@ -89,6 +89,34 @@ def _discovery_timeout_seconds() -> float:
 def _call_timeout_seconds() -> float:
     return _env_float(_CALL_TIMEOUT_ENV, _DEFAULT_CALL_TIMEOUT_SECONDS)
 
+
+# M3.5R -- how much longer the executor waits than the call itself.
+#
+# ``ToolExecutor`` runs every tool under its own watchdog, taken from
+# ``ToolSpec.timeout_seconds``, whose dataclass default is 30s. An OPS Bridge
+# tool that does not declare one therefore inherited a budget *half* the size
+# of the HTTP budget below it, and the watchdog decided every slow call: the
+# request was abandoned at 30s and reported as a generic "tool timed out",
+# so `httpx` never got to raise, the timeout subclass was never observable,
+# and a call that was about to succeed was thrown away.
+#
+# The margin only has to be big enough that the watchdog fires *after* the
+# HTTP budget has already failed. Then the error the user sees is the real
+# one -- ConnectTimeout, ReadTimeout, WriteTimeout or PoolTimeout -- and the
+# watchdog goes back to being what it is meant to be: the outer guard against
+# a tool that hangs without a timeout of its own.
+_WATCHDOG_MARGIN_SECONDS = 5.0
+
+
+def _tool_watchdog_seconds() -> float:
+    """The executor budget for an OPS Bridge tool.
+
+    Derived from the call budget rather than written next to it, so the two
+    cannot drift apart: raising OPS_BRIDGE_CALL_TIMEOUT_SECONDS for a slow
+    deployment moves both, and the ordering holds by construction.
+    """
+    return _call_timeout_seconds() + _WATCHDOG_MARGIN_SECONDS
+
 # M1.1 — OPS Bridge Authentication Boundary. Every OPS Bridge caller was
 # previously anonymous (no headers sent at all); OPS ONE's own
 # src/bridge/auth.ts already implements a dormant service-identity path
@@ -345,6 +373,9 @@ def _make_dynamic_tool_class(capability: Dict[str, Any]) -> Type[BaseTool]:
                 parameters=parameters,
                 category="business",
                 required_capabilities=["network:fetch"],
+                # Above the HTTP budget, so the call gets to fail on its own
+                # terms. See _tool_watchdog_seconds.
+                timeout_seconds=_tool_watchdog_seconds(),
             )
 
         def execute(self, **params: Any) -> ToolResult:

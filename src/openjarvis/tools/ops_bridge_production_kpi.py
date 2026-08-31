@@ -29,6 +29,7 @@ from openjarvis.tools.ops_bridge_generic import (
     _auth_headers,
     _bridge_base_url,
     _call_timeout_seconds,
+    _tool_watchdog_seconds,
 )
 
 _CAPABILITY = "ops.production.get_kpi"
@@ -96,6 +97,9 @@ class OpsBridgeProductionKpiTool(BaseTool):
             },
             category="business",
             required_capabilities=["network:fetch"],
+            # Same rule as the dynamic tools, from the same source: the
+            # executor's watchdog must outlast the HTTP call it wraps.
+            timeout_seconds=_tool_watchdog_seconds(),
         )
 
     def execute(self, **params: Any) -> ToolResult:

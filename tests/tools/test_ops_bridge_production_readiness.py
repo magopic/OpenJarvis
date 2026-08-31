@@ -37,6 +37,7 @@ from openjarvis.tools.ops_bridge_generic import (
     _DEFAULT_CALL_TIMEOUT_SECONDS,
     _DEFAULT_DISCOVERY_TIMEOUT_SECONDS,
     _call_timeout_seconds,
+    _tool_watchdog_seconds,
     _discovery_timeout_seconds,
     _env_float,
     discover_and_register_ops_bridge_tools,
@@ -429,3 +430,136 @@ class TestOtherFailureBranchesUnchanged:
             result = tool.execute()
         assert result.success is True
         assert "timed out" not in result.content
+
+
+class TestToolWatchdogOutlastsTheCall:
+    """M3.5R -- the executor's watchdog must not decide an OPS Bridge call.
+
+    ``ToolExecutor`` wraps every tool in a watchdog taken from
+    ``ToolSpec.timeout_seconds``, whose dataclass default is 30s. Neither OPS
+    Bridge tool declared one, so the watchdog was half the HTTP budget below
+    it and fired first on every slow call: the request was abandoned at 30s
+    and reported as a generic "tool timed out", `httpx` never raised, the
+    timeout subclass added in M3.3A.2 was never reachable, and a response
+    that was seconds from arriving was discarded.
+
+    What these pin is the ordering, not a number: the watchdog exists to
+    catch a tool with no timeout of its own, and an OPS Bridge tool has one.
+    """
+
+    def _dynamic_spec(self):
+        with respx.mock:
+            respx.post(_BRIDGE_URL).mock(
+                return_value=httpx.Response(200, json=_ok_discovery_payload())
+            )
+            discover_and_register_ops_bridge_tools()
+        return ToolRegistry.get("ops_dynamic_production_get_kpi")().spec
+
+    def test_the_dynamic_tool_outlasts_its_own_http_budget(self) -> None:
+        spec = self._dynamic_spec()
+        assert spec.timeout_seconds > _call_timeout_seconds(), (
+            "the watchdog must fire only after the call has already failed"
+        )
+        assert spec.timeout_seconds == _call_timeout_seconds() + 5.0
+
+    def test_the_legacy_tool_outlasts_it_too(self) -> None:
+        from openjarvis.tools.ops_bridge_production_kpi import OpsBridgeProductionKpiTool
+
+        spec = OpsBridgeProductionKpiTool().spec
+        assert spec.timeout_seconds > _call_timeout_seconds()
+        assert spec.timeout_seconds == _call_timeout_seconds() + 5.0
+
+    @pytest.mark.parametrize("budget, expected", [("60", 65.0), ("75", 80.0), ("90.5", 95.5)])
+    def test_the_budget_follows_the_configured_call_timeout(
+        self, monkeypatch: pytest.MonkeyPatch, budget: str, expected: float
+    ) -> None:
+        # Derived, not written down twice: raising the call budget for a slow
+        # deployment has to move the watchdog with it, or the ordering breaks
+        # again at exactly the deployment that needed it most.
+        monkeypatch.setenv("OPS_BRIDGE_CALL_TIMEOUT_SECONDS", budget)
+        assert _tool_watchdog_seconds() == expected
+        assert self._dynamic_spec().timeout_seconds == expected
+
+    def test_it_is_not_a_disconnected_constant(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        before = self._dynamic_spec().timeout_seconds
+        monkeypatch.setenv("OPS_BRIDGE_CALL_TIMEOUT_SECONDS", "120")
+        after = self._dynamic_spec().timeout_seconds
+        assert after != before, "a hardcoded 65.0 would not have moved"
+        assert after == 125.0
+
+    def test_a_malformed_budget_still_leaves_the_ordering_intact(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # _env_float degrades to the default rather than raising; the
+        # watchdog has to stay above whatever the call ends up using.
+        for bad in ("", "abc", "-1", "nan", "inf"):
+            monkeypatch.setenv("OPS_BRIDGE_CALL_TIMEOUT_SECONDS", bad)
+            assert _tool_watchdog_seconds() > _call_timeout_seconds(), bad
+
+
+class TestOtherToolsKeepTheirBudget:
+    """The fix touched two specs. Nothing else may have moved."""
+
+    def test_the_dataclass_default_is_unchanged(self) -> None:
+        from openjarvis.tools._stubs import ToolSpec
+
+        assert ToolSpec(name="x", description="y").timeout_seconds == 30.0
+
+    def test_the_executor_default_is_unchanged(self) -> None:
+        import inspect
+
+        from openjarvis.tools._stubs import ToolExecutor
+
+        default = inspect.signature(ToolExecutor.__init__).parameters["default_timeout"].default
+        assert default == 30.0
+
+    @pytest.mark.parametrize(
+        "module, cls_name, expected",
+        [
+            ("openjarvis.tools.shell_exec", None, 60.0),
+            ("openjarvis.tools.text_to_speech", None, 120.0),
+        ],
+    )
+    def test_tools_that_declared_their_own_budget_are_untouched(
+        self, module: str, cls_name: str | None, expected: float
+    ) -> None:
+        import importlib
+
+        mod = importlib.import_module(module)
+        specs = []
+        for obj in vars(mod).values():
+            if isinstance(obj, type) and hasattr(obj, "spec"):
+                try:
+                    specs.append(obj().spec.timeout_seconds)
+                except Exception:
+                    continue
+        assert expected in specs, f"{module} no longer declares {expected}"
+
+
+class TestTimeoutDiagnosticStillReachable:
+    """M3.3A.2's subclass reporting must survive -- it is the point."""
+
+    def _tool(self):
+        with respx.mock:
+            respx.post(_BRIDGE_URL).mock(
+                return_value=httpx.Response(200, json=_ok_discovery_payload())
+            )
+            discover_and_register_ops_bridge_tools()
+        return ToolRegistry.get("ops_dynamic_production_get_kpi")()
+
+    @pytest.mark.parametrize(
+        "raised, expected",
+        [
+            (httpx.ConnectTimeout("handshake stalled"), "ConnectTimeout"),
+            (httpx.ReadTimeout("answered too slowly"), "ReadTimeout"),
+        ],
+    )
+    def test_the_subclass_still_reaches_the_result(
+        self, raised: httpx.TimeoutException, expected: str
+    ) -> None:
+        tool = self._tool()
+        with respx.mock:
+            respx.post(_BRIDGE_URL).mock(side_effect=raised)
+            result = tool.execute()
+        assert result.success is False
+        assert expected in result.content
