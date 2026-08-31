@@ -169,3 +169,127 @@ class TestConversationIdValidation:
         r = client.post("/v1/chat/completions", json=_body(conversation_id="a b"))
         assert r.status_code == 400
         assert secret not in r.text
+
+class TestRuntimeApiKeyIsRecognised:
+    """M3.3A.1 -- the guard must ask the key the server actually runs with.
+
+    The bug this pins down: a server started from a key created by
+    ``jarvis auth create-key`` authenticated correctly -- unauthenticated
+    requests got 401 -- and yet refused every identified conversation with
+    503, because the guard consulted ``OPENJARVIS_API_KEY`` and
+    ``config.server.api_key`` while that key had reached the process through
+    neither. ``create_app`` resolves the key once, stores it on
+    ``app.state.api_key`` and hands the same value to ``AuthMiddleware``;
+    that is the only source that is true by construction.
+
+    The class above could not catch this: it models a configured server as
+    ``config.server.api_key``, a shape the real ``ServerConfig`` never
+    produces -- it declares no ``api_key`` field at all, so a key written to
+    the config file's ``[server.auth]`` section is invisible there.
+
+    These cases wire the app the way ``create_app`` does (state plus
+    middleware, one key) and set no environment variable and no config, so
+    the runtime value is the only thing that can answer.
+    """
+
+    KEY = "oj_sk_runtime_not_real"
+
+    def _served(self, api_key: str, monkeypatch) -> FastAPI:
+        """An app wired like ``create_app``: state and middleware, one key."""
+        from openjarvis.server.auth_middleware import AuthMiddleware
+
+        monkeypatch.delenv("OPENJARVIS_API_KEY", raising=False)
+        app = _app()
+        app.state.config = None  # as with a real ServerConfig: no api_key here
+        app.state.api_key = api_key
+        if api_key:
+            app.add_middleware(AuthMiddleware, api_key=api_key)
+        return app
+
+    # A -- an genuinely open server still refuses identified conversations.
+    def test_open_server_still_refuses_conversation_id(self, monkeypatch) -> None:
+        client = TestClient(self._served("", monkeypatch))
+        r = client.post("/v1/chat/completions", json=_body(conversation_id="conv-A"))
+        assert r.status_code == 503
+        assert "OPENJARVIS_API_KEY" in r.json()["detail"]
+
+    # B -- the regression itself.
+    def test_runtime_key_admits_an_identified_conversation(self, monkeypatch) -> None:
+        client = TestClient(self._served(self.KEY, monkeypatch))
+        r = client.post(
+            "/v1/chat/completions",
+            json=_body(conversation_id="conv-A"),
+            headers={"Authorization": f"Bearer {self.KEY}"},
+        )
+        assert r.status_code != 503, "the guard must not call an authenticated server open"
+        assert r.status_code == 200
+
+    # C -- authentication is not weakened by the fix.
+    def test_unauthenticated_request_is_still_refused(self, monkeypatch) -> None:
+        client = TestClient(self._served(self.KEY, monkeypatch))
+        r = client.post("/v1/chat/completions", json=_body(conversation_id="conv-A"))
+        assert r.status_code == 401
+
+    def test_wrong_key_is_still_refused(self, monkeypatch) -> None:
+        client = TestClient(self._served(self.KEY, monkeypatch))
+        r = client.post(
+            "/v1/chat/completions",
+            json=_body(conversation_id="conv-A"),
+            headers={"Authorization": "Bearer oj_sk_wrong_not_real"},
+        )
+        assert r.status_code == 401
+
+    # D -- the unidentified path does not regress.
+    def test_unidentified_path_unaffected_on_a_protected_server(
+        self, monkeypatch
+    ) -> None:
+        client = TestClient(self._served(self.KEY, monkeypatch))
+        r = client.post(
+            "/v1/chat/completions",
+            json=_body(),
+            headers={"Authorization": f"Bearer {self.KEY}"},
+        )
+        assert r.status_code == 200
+        assert r.json()["choices"][0]["message"]["content"] == "Done."
+
+    def test_no_key_is_echoed_by_the_guard(self, monkeypatch) -> None:
+        client = TestClient(self._served(self.KEY, monkeypatch))
+        r = client.post(
+            "/v1/chat/completions",
+            json=_body(conversation_id="a b"),
+            headers={"Authorization": f"Bearer {self.KEY}"},
+        )
+        assert r.status_code == 400
+        assert self.KEY not in r.text
+
+    def test_a_config_shaped_like_the_real_one_does_not_answer_for_the_runtime(
+        self, monkeypatch
+    ) -> None:
+        """The guard must not regress into trusting the config shape again.
+
+        ``ServerConfig`` exposes host, port, workers, model, agent and
+        cors_origins -- and no api_key. An object of that shape must leave
+        the decision entirely to the runtime value.
+        """
+        from openjarvis.server.routes import _server_api_key_configured
+
+        class _ServerConfigLike:
+            host = "127.0.0.1"
+            port = 8000
+            workers = 1
+            model = "test-model"
+            agent = "orchestrator"
+            cors_origins: list = []
+
+        class _ConfigLike:
+            server = _ServerConfigLike()
+
+        monkeypatch.delenv("OPENJARVIS_API_KEY", raising=False)
+        app = _app()
+        app.state.config = _ConfigLike()
+
+        app.state.api_key = ""
+        assert _server_api_key_configured(app) is False
+
+        app.state.api_key = self.KEY
+        assert _server_api_key_configured(app) is True

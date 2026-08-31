@@ -142,9 +142,22 @@ def _server_api_key_configured(app) -> bool:
     ``AuthMiddleware`` is a deliberate no-op when no key is set, which keeps
     local development frictionless. The identified-conversation path refuses
     to run in that mode instead of silently serving an open MAIA.
+
+    ``app.state.api_key`` is asked first because it is the value this server
+    actually authenticates with: ``create_app`` stores the resolved key there
+    and hands that same key to ``AuthMiddleware``. The two sources below are
+    only places the key may have come from, and neither is complete -- a key
+    created by ``jarvis auth create-key`` is written to the config file's
+    ``[server.auth]`` section, which ``ServerConfig`` does not model, so it
+    is invisible to both. Consulting them instead of the runtime made this
+    guard read a genuinely authenticated server as open and reject every
+    identified conversation with 503, while unauthenticated requests were
+    still correctly refused with 401.
     """
     import os
 
+    if getattr(app.state, "api_key", ""):
+        return True
     if os.environ.get("OPENJARVIS_API_KEY"):
         return True
     config = getattr(app.state, "config", None)
