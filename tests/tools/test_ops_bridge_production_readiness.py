@@ -310,3 +310,122 @@ class TestNoSecretLeak:
         assert _SECRET not in warnings.text
         assert "x-ops-service-token" not in warnings.text.lower()
         assert "authorization" not in warnings.text.lower()
+
+class TestTimeoutSubclassIsPreserved:
+    """M3.3A.2 — a timeout must say *which* timeout it was.
+
+    httpx raises ConnectTimeout, ReadTimeout, WriteTimeout and PoolTimeout
+    from one base, and the tool caught the base and reported a single
+    undifferentiated message. The distinction is the whole diagnosis: a
+    stalled TCP/TLS handshake and a Bridge that accepted the connection but
+    answered too slowly are different faults with opposite fixes, and in
+    M3.4B.2C a real transient timeout could not be classified after the
+    fact because the type had already been discarded here.
+    """
+
+    def _tool(self):
+        """Register the capability, then hand back a live tool instance."""
+        with respx.mock:
+            respx.post(_BRIDGE_URL).mock(
+                return_value=httpx.Response(200, json=_ok_discovery_payload())
+            )
+            discover_and_register_ops_bridge_tools()
+        return ToolRegistry.get("ops_dynamic_production_get_kpi")()
+
+    @pytest.mark.parametrize(
+        "raised, expected, other",
+        [
+            (httpx.ConnectTimeout("handshake stalled"), "ConnectTimeout", "ReadTimeout"),
+            (httpx.ReadTimeout("bridge answered too slowly"), "ReadTimeout", "ConnectTimeout"),
+        ],
+    )
+    def test_the_subclass_name_reaches_the_tool_result(
+        self, raised: httpx.TimeoutException, expected: str, other: str
+    ) -> None:
+        tool = self._tool()
+        with respx.mock:
+            respx.post(_BRIDGE_URL).mock(side_effect=raised)
+            result = tool.execute()
+
+        assert result.success is False
+        assert expected in result.content, result.content
+        # Not merely "contains a name": it must name the right one.
+        assert other not in result.content
+
+    def test_write_and_pool_timeouts_are_distinguishable_too(self) -> None:
+        """The two rarer subclasses share the branch and must not collapse."""
+        seen = set()
+        for raised in (
+            httpx.WriteTimeout("send stalled"),
+            httpx.PoolTimeout("no connection available"),
+        ):
+            tool = self._tool()
+            with respx.mock:
+                respx.post(_BRIDGE_URL).mock(side_effect=raised)
+                result = tool.execute()
+            assert result.success is False
+            seen.add(type(raised).__name__ in result.content)
+        assert seen == {True}
+
+    def test_no_credential_reaches_the_timeout_message(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The added detail must not become a disclosure channel."""
+        monkeypatch.setenv("OPS_BRIDGE_SERVICE_TOKEN", _SECRET)
+        tool = self._tool()
+        with respx.mock:
+            respx.post(_BRIDGE_URL).mock(
+                side_effect=httpx.ConnectTimeout("handshake stalled")
+            )
+            result = tool.execute()
+
+        assert "ConnectTimeout" in result.content
+        assert _SECRET not in result.content
+        assert "Authorization" not in result.content
+        assert "x-ops-service-token" not in result.content
+
+
+class TestOtherFailureBranchesUnchanged:
+    """M3.3A.2 touched one branch. The neighbouring ones must be untouched."""
+
+    def _tool(self):
+        with respx.mock:
+            respx.post(_BRIDGE_URL).mock(
+                return_value=httpx.Response(200, json=_ok_discovery_payload())
+            )
+            discover_and_register_ops_bridge_tools()
+        return ToolRegistry.get("ops_dynamic_production_get_kpi")()
+
+    def test_http_error_branch_is_unchanged(self) -> None:
+        tool = self._tool()
+        with respx.mock:
+            respx.post(_BRIDGE_URL).mock(return_value=httpx.Response(503, text="down"))
+            result = tool.execute()
+        assert result.success is False
+        assert result.content == "OPS Bridge returned HTTP 503."
+
+    def test_transport_error_branch_is_unchanged(self) -> None:
+        tool = self._tool()
+        with respx.mock:
+            respx.post(_BRIDGE_URL).mock(side_effect=httpx.ConnectError("refused"))
+            result = tool.execute()
+        assert result.success is False
+        assert result.content.startswith("Could not reach OPS Bridge:")
+        # A ConnectError is not a timeout and must not be labelled as one.
+        assert "timed out" not in result.content
+
+    def test_the_success_path_still_returns_the_envelope(self) -> None:
+        tool = self._tool()
+        envelope = {
+            "status": "ok",
+            "data": {"oee": 88.61},
+            "source": "test",
+            "period": None,
+            "reason": None,
+            "confidence_status": "not_evaluated",
+        }
+        with respx.mock:
+            respx.post(_BRIDGE_URL).mock(return_value=httpx.Response(200, json=envelope))
+            result = tool.execute()
+        assert result.success is True
+        assert "timed out" not in result.content

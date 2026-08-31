@@ -351,9 +351,21 @@ def _make_dynamic_tool_class(capability: Dict[str, Any]) -> Type[BaseTool]:
             try:
                 envelope = _call_bridge(capability_name, params)
             except httpx.TimeoutException as exc:
+                # Name the subclass. httpx raises ConnectTimeout,
+                # ReadTimeout, WriteTimeout and PoolTimeout from this one
+                # base, and a bare `except httpx.TimeoutException` collapses
+                # them into a single indistinguishable failure -- which left
+                # a real transient timeout undiagnosable in M3.4B.2C, since
+                # a stalled TCP/TLS handshake and a slow Bridge response need
+                # opposite answers and looked identical here. The class name
+                # is a fixed httpx identifier, so it carries no credential,
+                # no URL and nothing from the request.
                 return ToolResult(
                     tool_name=_tool_id,
-                    content=f"OPS Bridge request timed out: {exc}",
+                    content=(
+                        f"OPS Bridge request timed out "
+                        f"({type(exc).__name__}): {exc}"
+                    ),
                     success=False,
                 )
             except httpx.HTTPStatusError as exc:
