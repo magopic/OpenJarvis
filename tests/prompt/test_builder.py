@@ -196,6 +196,7 @@ def test_sections_expose_prompt_metadata(memory_dir: Path):
         "referent_continuity_discipline",
         "document_comparison_discipline",
         "second_brain_evidence_reference_discipline",
+        "presentation_policy",
         "current_time",
         "soul",
         "memory",
@@ -203,8 +204,8 @@ def test_sections_expose_prompt_metadata(memory_dir: Path):
         "session_context",
         "previous_state",
     ]
-    assert sections[7].source == str(memory_dir / "SOUL.md")
-    assert sections[7].cache_segment == "frozen_prefix"
+    assert sections[8].source == str(memory_dir / "SOUL.md")
+    assert sections[8].cache_segment == "frozen_prefix"
     assert sections[-1].cache_segment == "dynamic_suffix"
     assert builder.build() == "\n\n".join(section.content for section in sections)
 

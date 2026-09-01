@@ -1503,6 +1503,14 @@ class SystemPromptConfig:
     user_max_chars: int = 1500
     skill_desc_max_chars: int = 60
     truncation_strategy: str = "head_tail"
+    # Whether the assistant is told how to *present* an answer, as opposed to
+    # what it may claim. With no such guidance a capable model defaults to
+    # exhaustiveness: it reports every field a tool handed it -- completeness
+    # counts, confidence flags, formulas -- because nothing told it that a
+    # conversation is not an audit log. The rule this gates changes only the
+    # shape of the reply; the grounding rules above it are untouched, and its
+    # own safety overrides are not compressible.
+    presentation_policy: bool = True
 
 
 @dataclass(slots=True)

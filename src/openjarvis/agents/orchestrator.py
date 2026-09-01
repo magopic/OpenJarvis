@@ -100,6 +100,48 @@ _COVERAGE_FAMILIES = {
 # native_openhands.py's `_strip_tool_call_text`/`_parse_action` -- this is
 # the same recovery, applied where OrchestratorAgent's function_calling
 # loop previously had none).
+# M3.6A.1: what a coverage nudge must not cost.
+#
+# Both nudges below ask the model to reconsider a draft it has already
+# written. A live trace showed what that costs: the first draft correctly
+# marked a figure as indirect -- carried inside another period's result
+# rather than retrieved for itself -- and the rewrite that followed the
+# nudge dropped the qualifier, leaving the figure looking exactly like the
+# ones that had been fetched directly. Nothing was fabricated; a distinction
+# the reader needed simply did not survive being reformatted.
+#
+# The nudge is the right place to say so. It is a Role.USER message arriving
+# after the draft, so it carries the recency and the transformation context
+# that a static system-prompt rule cannot: the model had in fact obeyed that
+# rule moments earlier, and still lost the qualifier when asked to redo the
+# answer. This does not tell it to stop rewriting -- rewriting is the point,
+# and the new evidence has to be worked in.
+_PRESERVE_EVIDENCE_CLASS = (
+    " However you restructure the answer, keep the evidence qualifications it"
+    " already carries. Expanding, reordering, shortening or rewriting is fine;"
+    " quietly upgrading a claim is not. A value you marked as indirect,"
+    " inferred, provisional or uncertain must still be marked that way"
+    " afterwards, an attribute you scoped to one result must not end up"
+    " spread across others, and an interpretation must not resurface as a"
+    " fact. Add coverage without strengthening what you already said."
+    " The same holds for the record of what actually happened. This"
+    " conversation already shows which lookups ran, which returned nothing,"
+    " which were refused before running and why, and which sources were"
+    " never consulted at all; a rewrite may say it better but may not say it"
+    " differently. Not looked at is not the same as looked at and empty. A"
+    " request stopped before it ran is not a call that ran and failed, and"
+    " the reason it was stopped is whatever the record says it was, not a"
+    " likelier-sounding one. A search that succeeded and found nothing is"
+    " not a search that never happened."
+    " None of this obliges you to describe machinery. Execution detail that"
+    " does not matter to the answer is better left out, and a source you did"
+    " not consult can simply go unmentioned -- you are never required to"
+    " call one to be allowed to finish. But once you do mention any of it,"
+    " say only what the record supports: an unconsulted source may be named"
+    " as unconsulted, never reported as holding nothing."
+)
+
+
 _TOOL_CALL_TAG_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
 
 
@@ -753,6 +795,7 @@ class OrchestratorAgent(ToolUsingAgent):
                             "finalize without checking further -- do not call a "
                             "source that is not relevant to any part of the "
                             "question, and do not guess at what it would say."
+                            + _PRESERVE_EVIDENCE_CLASS
                         )
                         messages.append(Message(role=Role.USER, content=nudge))
                         continue
@@ -859,6 +902,7 @@ class OrchestratorAgent(ToolUsingAgent):
                         "have already tried a reasonably broad search, it is "
                         "fine to finalize now and state plainly that nothing "
                         "relevant was found -- do not guess."
+                        + _PRESERVE_EVIDENCE_CLASS
                     )
                     messages.append(Message(role=Role.USER, content=nudge))
                     continue
